@@ -18,6 +18,7 @@ type Config struct {
 	KeycloakOrganizationID    string
 	KeycloakAdminClientID     string
 	KeycloakAdminClientSecret string
+	KeycloakCAFile            string
 	ServiceActorSubject       string
 	AllowedRoles              map[string]struct{}
 	RoleGroupIDs              map[string]string
@@ -31,6 +32,7 @@ func LoadConfig() (Config, error) {
 		KeycloakOrganizationID:    strings.TrimSpace(os.Getenv("KEYCLOAK_ORGANIZATION_ID")),
 		KeycloakAdminClientID:     strings.TrimSpace(os.Getenv("KEYCLOAK_ADMIN_CLIENT_ID")),
 		KeycloakAdminClientSecret: strings.TrimSpace(os.Getenv("KEYCLOAK_ADMIN_CLIENT_SECRET")),
+		KeycloakCAFile:            strings.TrimSpace(os.Getenv("KEYCLOAK_CA_FILE")),
 		ServiceActorSubject:       strings.TrimSpace(os.Getenv("KEYCLOAK_SERVICE_ACTOR_SUBJECT")),
 		AllowedRoles:              make(map[string]struct{}),
 		RoleGroupIDs:              make(map[string]string),

@@ -1,0 +1,51 @@
+services:
+  postgres:
+    image: postgres:16
+    network_mode: host
+    environment:
+      POSTGRES_DB: adminservice
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set in integration/.env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U platform -d adminservice"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  mailpit:
+    image: axllent/mailpit:v1.29.7
+    network_mode: host
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.1
+    network_mode: host
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    environment:
+      KC_DB: postgres
+      KC_DB_URL_HOST: 127.0.0.1
+      KC_DB_URL_DATABASE: keycloak
+      KC_DB_USERNAME: platform
+      KC_DB_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set in integration/.env}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME:?set in integration/.env}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD:?set in integration/.env}
+      KC_HOSTNAME: https://localhost:8443
+    command:
+      - start-dev
+      - --features=organization
+      - --http-enabled=false
+      - --https-port=8443
+      - --https-certificate-file=/opt/keycloak/conf/tls.crt
+      - --https-certificate-key-file=/opt/keycloak/conf/tls.key
+    volumes:
+      - ./tls/tls.crt:/opt/keycloak/conf/tls.crt:ro
+      - ./tls/tls.key:/opt/keycloak/conf/tls.key:ro
+
+volumes:
+  postgres-data:

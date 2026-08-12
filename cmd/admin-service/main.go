@@ -26,7 +26,11 @@ func main() {
 	}
 	defer store.Close()
 
-	service := admin.NewHTTPService(store, admin.NewKeycloakClient(config), config)
+	keycloakClient, err := admin.NewKeycloakClient(config)
+	if err != nil {
+		log.Fatal(err)
+	}
+	service := admin.NewHTTPService(store, keycloakClient, config)
 	server := &http.Server{
 		Addr:              config.ListenAddress,
 		Handler:           service.Handler(),

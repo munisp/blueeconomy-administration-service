@@ -1,0 +1,10 @@
+# Local integration secrets and generated TLS material
+integration/.env
+integration/tls/*
+integration/results/*
+!integration/results/.gitkeep
+
+# Local Go output
+bin/
+*.test
+coverage.out

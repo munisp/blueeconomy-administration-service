@@ -2,12 +2,15 @@ package admin
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -29,9 +32,13 @@ type accessTokenResponse struct {
 	ExpiresIn   int    `json:"expires_in"`
 }
 
-func NewKeycloakClient(config Config) *KeycloakClient {
+func NewKeycloakClient(config Config) (*KeycloakClient, error) {
+	httpClient, err := newKeycloakHTTPClient(config.KeycloakCAFile)
+	if err != nil {
+		return nil, err
+	}
 	return &KeycloakClient{
-		httpClient:     &http.Client{Timeout: 15 * time.Second},
+		httpClient:     httpClient,
 		tokenURL:       config.KeycloakTokenURL,
 		adminBaseURL:   config.KeycloakAdminBaseURL,
 		realm:          config.KeycloakRealm,
@@ -39,7 +46,26 @@ func NewKeycloakClient(config Config) *KeycloakClient {
 		clientID:       config.KeycloakAdminClientID,
 		clientSecret:   config.KeycloakAdminClientSecret,
 		roleGroupIDs:   config.RoleGroupIDs,
+	}, nil
+}
+
+func newKeycloakHTTPClient(caFile string) (*http.Client, error) {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if caFile != "" {
+		certificate, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read Keycloak CA file: %w", err)
+		}
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if !pool.AppendCertsFromPEM(certificate) {
+			return nil, errors.New("Keycloak CA file did not contain a usable PEM certificate")
+		}
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}
 	}
+	return &http.Client{Timeout: 15 * time.Second, Transport: transport}, nil
 }
 
 func (client *KeycloakClient) InviteUser(ctx context.Context, request OnboardingRequest) error {
