@@ -21,7 +21,9 @@ require() {
 for command in curl jq openssl go sudo docker; do require "$command"; done
 
 umask 077
-rm -f "$integration/.env" "$integration/tls/tls.crt" "$integration/tls/tls.key" "$integration/results/local-integration-result.json" "$integration/results/admin-service.log"
+rm -f "$integration/.env" "$integration/tls/tls.crt" "$integration/tls/tls.key" "$integration/results/local-integration-result.json" "$integration/results/admin-service.log" "$integration/results/integration.cover.out" "$integration/results/integration.coverage.txt"
+rm -rf "$integration/results/go-coverage"
+mkdir -p "$integration/results/go-coverage"
 printf 'POSTGRES_SUPERUSER_PASSWORD=%s\n' "$(openssl rand -hex 24)" > "$integration/.env"
 printf 'KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME=local-admin\n' >> "$integration/.env"
 printf 'KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> "$integration/.env"
@@ -107,7 +109,7 @@ sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml
 sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml" exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U platform -d adminservice < "$root/db/migrations/0002_activation.sql"
 
-GOTOOLCHAIN=local go build -o "$integration/results/admin-service-bin" "$root/cmd/admin-service"
+GOTOOLCHAIN=local go build -cover -coverpkg=./... -o "$integration/results/admin-service-bin" "$root/cmd/admin-service"
 ADMIN_SERVICE_LISTEN_ADDRESS='127.0.0.1:18080' \
 ADMIN_SERVICE_POSTGRES_DSN="postgres://platform:$postgres_password@127.0.0.1:5432/adminservice?sslmode=disable" \
 KEYCLOAK_TOKEN_URL="$keycloak_base/realms/$realm/protocol/openid-connect/token" \
@@ -118,6 +120,7 @@ KEYCLOAK_ADMIN_CLIENT_ID="$client_id" \
 KEYCLOAK_ADMIN_CLIENT_SECRET="$client_secret" \
 KEYCLOAK_CA_FILE="$integration/tls/tls.crt" \
 KEYCLOAK_SERVICE_ACTOR_SUBJECT='service:central-administration-local-integration' \
+GOCOVERDIR="$integration/results/go-coverage" \
 ONBOARDING_ALLOWED_ROLES='safety.telemetry.review' \
 KEYCLOAK_ROLE_GROUP_MAPPING_JSON="$(jq -nc --arg group "$group_id" '{"safety.telemetry.review":$group}')" \
 "$integration/results/admin-service-bin" > "$integration/results/admin-service.log" 2>&1 &
@@ -133,6 +136,11 @@ configured_organization="$(tr '\0' '\n' < "/proc/$service_pid/environ" | sed -n 
   echo 'central administration service organization configuration mismatch' >&2
   exit 1
 }
+
+echo 'integration stage: verify API denials and input controls' >&2
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/onboarding/requests -H 'Content-Type: application/json' --data '{}')" == '401' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/onboarding/requests -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-Subject: local-requester' --data '{"undeclared":true}')" == '400' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/onboarding/requests -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-Subject: local-requester' --data "$(jq -nc --arg org "$organization_id" '{organization_id:$org,email:"unsupported.role@blueeconomy.test",first_name:"Unsupported",last_name:"Role",requested_roles:["undeclared.role"]}')")" == '400' ]]
 
 echo 'integration stage: submit onboarding request' >&2
 submit_response="$(mktemp)"
@@ -151,14 +159,20 @@ request_id="$(jq -er '.id' <<<"$request_json")"
 request_status="$(jq -er '.status' <<<"$request_json")"
 [[ "$request_status" == 'submitted' ]]
 
+echo 'integration stage: verify maker/checker and decision validation' >&2
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/decision" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-Subject: local-requester' --data '{"decision":"approve","reason":"self approval must fail"}')" == '403' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/decision" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-Subject: local-approver' --data '{"decision":"defer","reason":"unsupported"}')" == '400' ]]
+
 echo 'integration stage: approve onboarding request' >&2
 curl --silent --show-error --fail -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/decision" \
   -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-Subject: local-approver' \
   --data '{"decision":"approve","reason":"Local integration approval"}' | grep -qx '200'
 
 echo 'integration stage: provision Keycloak invitation' >&2
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/provision")" == '401' ]]
 curl --silent --show-error --fail -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/provision" \
   -H 'X-Blueeconomy-Authenticated-Subject: local-provisioner' | grep -qx '204'
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/provision" -H 'X-Blueeconomy-Authenticated-Subject: local-provisioner')" == '409' ]]
 
 mail_count="$(curl --silent --show-error --fail http://127.0.0.1:8025/api/v1/messages | jq -er '.messages | length')"
 [[ "$mail_count" -ge 1 ]]
@@ -170,9 +184,11 @@ curl "${ca[@]}" -o /dev/null -w '%{http_code}' -X POST "$admin_api/$realm/organi
   -H "Authorization: Bearer $master_token" -H 'Content-Type: application/json' --data "\"$user_id\"" | grep -qx '201'
 
 echo 'integration stage: activate Keycloak organization group' >&2
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/activate" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-Subject: local-activator' --data '{}')" == '400' ]]
 curl --silent --show-error --fail -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/activate" \
   -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-Subject: local-activator' \
   --data "$(jq -nc --arg user_id "$user_id" '{keycloak_user_id:$user_id}')" | grep -qx '204'
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/activate" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-Subject: local-activator' --data "$(jq -nc --arg user_id "$user_id" '{keycloak_user_id:$user_id}')")" == '409' ]]
 
 final_status="$(sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml" exec -T postgres \
   psql -At -U platform -d adminservice -c "SELECT status FROM onboarding_requests WHERE id = '$request_id'" | tr -d '\r')"
@@ -194,3 +210,9 @@ jq -n \
   > "$integration/results/local-integration-result.json"
 
 cat "$integration/results/local-integration-result.json"
+
+kill "$service_pid"
+wait "$service_pid"
+service_pid=""
+go tool covdata textfmt -i="$integration/results/go-coverage" -o="$integration/results/integration.cover.out"
+go tool cover -func="$integration/results/integration.cover.out" | tee "$integration/results/integration.coverage.txt"
