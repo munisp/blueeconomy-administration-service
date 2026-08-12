@@ -97,6 +97,42 @@ RETURNING id::text, organization_id, email, first_name, last_name, requested_rol
 	return request, nil
 }
 
+func (store *Store) ClaimActivation(ctx context.Context, id string) (OnboardingRequest, error) {
+	const query = `
+UPDATE onboarding_requests
+SET status = 'activating'
+WHERE id = $1 AND status = 'invited'
+RETURNING id::text, organization_id, email, first_name, last_name, requested_roles, requester_subject, status, created_at, updated_at`
+	request, err := scanRequest(store.pool.QueryRow(ctx, query, id))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return OnboardingRequest{}, errors.New("onboarding request is not invited for activation")
+		}
+		return OnboardingRequest{}, fmt.Errorf("claim onboarding activation: %w", err)
+	}
+	return request, nil
+}
+
+func (store *Store) RecordActivationResult(ctx context.Context, id, actorSubject string, success bool, reason string) error {
+	status := StatusActivationFailed
+	decision := "activation_failed"
+	if success {
+		status = StatusActive
+		decision = "active"
+	}
+	command, err := store.pool.Exec(ctx, `UPDATE onboarding_requests SET status = $2 WHERE id = $1 AND status = 'activating'`, id, status)
+	if err != nil {
+		return fmt.Errorf("update activation status: %w", err)
+	}
+	if command.RowsAffected() != 1 {
+		return errors.New("onboarding request is not in activating state")
+	}
+	if _, err := store.pool.Exec(ctx, `INSERT INTO onboarding_decisions (request_id, decision, actor_subject, reason) VALUES ($1, $2, $3, $4)`, id, decision, actorSubject, reason); err != nil {
+		return fmt.Errorf("write activation decision: %w", err)
+	}
+	return nil
+}
+
 func (store *Store) RecordProvisioningResult(ctx context.Context, id, actorSubject string, success bool, reason string) error {
 	status := StatusProvisioningFailed
 	if success {

@@ -20,6 +20,7 @@ type KeycloakClient struct {
 	organizationID string
 	clientID       string
 	clientSecret   string
+	roleGroupIDs   map[string]string
 }
 
 type accessTokenResponse struct {
@@ -37,6 +38,7 @@ func NewKeycloakClient(config Config) *KeycloakClient {
 		organizationID: config.KeycloakOrganizationID,
 		clientID:       config.KeycloakAdminClientID,
 		clientSecret:   config.KeycloakAdminClientSecret,
+		roleGroupIDs:   config.RoleGroupIDs,
 	}
 }
 
@@ -65,6 +67,37 @@ func (client *KeycloakClient) InviteUser(ctx context.Context, request Onboarding
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("Keycloak invitation returned HTTP %d", response.StatusCode)
+	}
+	return nil
+}
+
+func (client *KeycloakClient) AssignApprovedRoleGroups(ctx context.Context, keycloakUserID string, roles []string) error {
+	if strings.TrimSpace(keycloakUserID) == "" {
+		return errors.New("Keycloak user ID is required for group activation")
+	}
+	token, err := client.clientCredentialsToken(ctx)
+	if err != nil {
+		return err
+	}
+	for _, role := range roles {
+		groupID, exists := client.roleGroupIDs[role]
+		if !exists || strings.TrimSpace(groupID) == "" {
+			return fmt.Errorf("no approved Keycloak group mapping exists for role %q", role)
+		}
+		endpoint := client.adminBaseURL.JoinPath("admin", "realms", client.realm, "organizations", client.organizationID, "groups", groupID, "members", keycloakUserID)
+		request, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint.String(), nil)
+		if err != nil {
+			return fmt.Errorf("create Keycloak organization group request: %w", err)
+		}
+		request.Header.Set("Authorization", "Bearer "+token)
+		response, err := client.httpClient.Do(request)
+		if err != nil {
+			return fmt.Errorf("send Keycloak organization group request: %w", err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusNoContent {
+			return fmt.Errorf("Keycloak organization group assignment for role %q returned HTTP %d", role, response.StatusCode)
+		}
 	}
 	return nil
 }

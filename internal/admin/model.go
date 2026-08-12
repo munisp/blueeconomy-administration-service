@@ -15,6 +15,9 @@ const (
 	StatusApproved           RequestStatus = "approved"
 	StatusRejected           RequestStatus = "rejected"
 	StatusInvited            RequestStatus = "invited"
+	StatusActivating         RequestStatus = "activating"
+	StatusActivationFailed   RequestStatus = "activation_failed"
+	StatusActive             RequestStatus = "active"
 	StatusProvisioningFailed RequestStatus = "provisioning_failed"
 )
 

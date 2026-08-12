@@ -34,6 +34,7 @@ func (service *HTTPService) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/onboarding/requests", service.submit)
 	mux.HandleFunc("POST /v1/onboarding/requests/{id}/decision", service.decide)
 	mux.HandleFunc("POST /v1/onboarding/requests/{id}/provision", service.provision)
+	mux.HandleFunc("POST /v1/onboarding/requests/{id}/activate", service.activate)
 	return securityHeaders(mux)
 }
 
@@ -92,6 +93,37 @@ func (service *HTTPService) decide(writer http.ResponseWriter, request *http.Req
 		return
 	}
 	writeJSON(writer, http.StatusOK, result)
+}
+
+func (service *HTTPService) activate(writer http.ResponseWriter, request *http.Request) {
+	if _, err := authenticatedSubject(request); err != nil {
+		writeError(writer, http.StatusUnauthorized, err)
+		return
+	}
+	var input struct {
+		KeycloakUserID string `json:"keycloak_user_id"`
+	}
+	if err := decodeJSON(request, &input); err != nil || strings.TrimSpace(input.KeycloakUserID) == "" || len(input.KeycloakUserID) > 512 {
+		writeError(writer, http.StatusBadRequest, errors.New("a Keycloak user ID is required for activation"))
+		return
+	}
+	candidate, err := service.store.ClaimActivation(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, http.StatusConflict, err)
+		return
+	}
+	contextWithTimeout, cancel := context.WithTimeout(request.Context(), 20*time.Second)
+	defer cancel()
+	if err := service.keycloak.AssignApprovedRoleGroups(contextWithTimeout, strings.TrimSpace(input.KeycloakUserID), candidate.RequestedRoles); err != nil {
+		_ = service.store.RecordActivationResult(request.Context(), candidate.ID, service.serviceActor, false, "Keycloak organization group assignment failed")
+		writeError(writer, http.StatusBadGateway, errors.New("Keycloak role activation did not complete"))
+		return
+	}
+	if err := service.store.RecordActivationResult(request.Context(), candidate.ID, service.serviceActor, true, "Keycloak organization group assignment completed"); err != nil {
+		writeError(writer, http.StatusInternalServerError, errors.New("role activation completed but evidence update failed; investigate immediately"))
+		return
+	}
+	writeJSON(writer, http.StatusNoContent, nil)
 }
 
 func (service *HTTPService) provision(writer http.ResponseWriter, request *http.Request) {

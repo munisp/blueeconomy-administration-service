@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -19,6 +20,7 @@ type Config struct {
 	KeycloakAdminClientSecret string
 	ServiceActorSubject       string
 	AllowedRoles              map[string]struct{}
+	RoleGroupIDs              map[string]string
 }
 
 func LoadConfig() (Config, error) {
@@ -31,6 +33,7 @@ func LoadConfig() (Config, error) {
 		KeycloakAdminClientSecret: strings.TrimSpace(os.Getenv("KEYCLOAK_ADMIN_CLIENT_SECRET")),
 		ServiceActorSubject:       strings.TrimSpace(os.Getenv("KEYCLOAK_SERVICE_ACTOR_SUBJECT")),
 		AllowedRoles:              make(map[string]struct{}),
+		RoleGroupIDs:              make(map[string]string),
 	}
 	if config.ListenAddress == "" {
 		return Config{}, errors.New("ADMIN_SERVICE_LISTEN_ADDRESS is required")
@@ -65,6 +68,20 @@ func LoadConfig() (Config, error) {
 	}
 	if len(config.AllowedRoles) == 0 {
 		return Config{}, errors.New("ONBOARDING_ALLOWED_ROLES must contain one or more approved roles")
+	}
+	mapping := strings.TrimSpace(os.Getenv("KEYCLOAK_ROLE_GROUP_MAPPING_JSON"))
+	if mapping == "" {
+		return Config{}, errors.New("KEYCLOAK_ROLE_GROUP_MAPPING_JSON is required")
+	}
+	if err := json.Unmarshal([]byte(mapping), &config.RoleGroupIDs); err != nil {
+		return Config{}, fmt.Errorf("parse KEYCLOAK_ROLE_GROUP_MAPPING_JSON: %w", err)
+	}
+	for role := range config.AllowedRoles {
+		groupID := strings.TrimSpace(config.RoleGroupIDs[role])
+		if groupID == "" {
+			return Config{}, fmt.Errorf("role %q has no approved Keycloak group mapping", role)
+		}
+		config.RoleGroupIDs[role] = groupID
 	}
 	return config, nil
 }
