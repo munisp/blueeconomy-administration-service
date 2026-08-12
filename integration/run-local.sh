@@ -35,6 +35,7 @@ chmod 600 "$integration/.env" "$integration/tls/tls.key"
 chmod +x "$integration/postgres-init/01-create-keycloak-db.sh"
 
 "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+pkill -f '/tmp/go-build.*/exe/admin-service' >/dev/null 2>&1 || true
 "${compose[@]}" up -d
 
 for _ in $(seq 1 90); do
@@ -106,6 +107,7 @@ sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml
 sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml" exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U platform -d adminservice < "$root/db/migrations/0002_activation.sql"
 
+GOTOOLCHAIN=local go build -o "$integration/results/admin-service-bin" "$root/cmd/admin-service"
 ADMIN_SERVICE_LISTEN_ADDRESS='127.0.0.1:18080' \
 ADMIN_SERVICE_POSTGRES_DSN="postgres://platform:$postgres_password@127.0.0.1:5432/adminservice?sslmode=disable" \
 KEYCLOAK_TOKEN_URL="$keycloak_base/realms/$realm/protocol/openid-connect/token" \
@@ -118,7 +120,7 @@ KEYCLOAK_CA_FILE="$integration/tls/tls.crt" \
 KEYCLOAK_SERVICE_ACTOR_SUBJECT='service:central-administration-local-integration' \
 ONBOARDING_ALLOWED_ROLES='safety.telemetry.review' \
 KEYCLOAK_ROLE_GROUP_MAPPING_JSON="$(jq -nc --arg group "$group_id" '{"safety.telemetry.review":$group}')" \
-GOTOOLCHAIN=local go run "$root/cmd/admin-service" > "$integration/results/admin-service.log" 2>&1 &
+"$integration/results/admin-service-bin" > "$integration/results/admin-service.log" 2>&1 &
 service_pid="$!"
 
 for _ in $(seq 1 30); do
@@ -126,19 +128,35 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 curl --silent --fail http://127.0.0.1:18080/healthz >/dev/null
+configured_organization="$(tr '\0' '\n' < "/proc/$service_pid/environ" | sed -n 's/^KEYCLOAK_ORGANIZATION_ID=//p')"
+[[ "$configured_organization" == "$organization_id" ]] || {
+  echo 'central administration service organization configuration mismatch' >&2
+  exit 1
+}
 
-request_json="$(curl --silent --show-error --fail -X POST http://127.0.0.1:18080/v1/onboarding/requests \
+echo 'integration stage: submit onboarding request' >&2
+submit_response="$(mktemp)"
+submit_status="$(curl --silent --show-error -o "$submit_response" -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/onboarding/requests \
   -H 'Content-Type: application/json' \
   -H 'X-Blueeconomy-Authenticated-Subject: local-requester' \
   --data "$(jq -nc --arg org "$organization_id" '{organization_id:$org,email:"stakeholder.local@blueeconomy.test",first_name:"Local",last_name:"Stakeholder",requested_roles:["safety.telemetry.review"]}')")"
+if [[ "$submit_status" != '201' ]]; then
+  cat "$submit_response" >&2
+  rm -f "$submit_response"
+  exit 1
+fi
+request_json="$(cat "$submit_response")"
+rm -f "$submit_response"
 request_id="$(jq -er '.id' <<<"$request_json")"
 request_status="$(jq -er '.status' <<<"$request_json")"
 [[ "$request_status" == 'submitted' ]]
 
+echo 'integration stage: approve onboarding request' >&2
 curl --silent --show-error --fail -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/decision" \
   -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-Subject: local-approver' \
   --data '{"decision":"approve","reason":"Local integration approval"}' | grep -qx '200'
 
+echo 'integration stage: provision Keycloak invitation' >&2
 curl --silent --show-error --fail -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/provision" \
   -H 'X-Blueeconomy-Authenticated-Subject: local-provisioner' | grep -qx '204'
 
@@ -151,6 +169,7 @@ user_id="$(capture_location -X POST "$admin_api/$realm/users" \
 curl "${ca[@]}" -o /dev/null -w '%{http_code}' -X POST "$admin_api/$realm/organizations/$organization_id/members" \
   -H "Authorization: Bearer $master_token" -H 'Content-Type: application/json' --data "\"$user_id\"" | grep -qx '201'
 
+echo 'integration stage: activate Keycloak organization group' >&2
 curl --silent --show-error --fail -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/activate" \
   -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-Subject: local-activator' \
   --data "$(jq -nc --arg user_id "$user_id" '{keycloak_user_id:$user_id}')" | grep -qx '204'

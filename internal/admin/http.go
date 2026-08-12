@@ -53,6 +53,7 @@ func (service *HTTPService) submit(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
+	input.OrganizationID = strings.TrimSpace(input.OrganizationID)
 	if err := input.Validate(service.organizationID, service.allowedRoles); err != nil {
 		writeError(writer, http.StatusBadRequest, err)
 		return
@@ -166,7 +167,8 @@ func decodeJSON(request *http.Request, target any) error {
 	if err := decoder.Decode(target); err != nil {
 		return errors.New("request body is invalid")
 	}
-	if decoder.More() {
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return errors.New("request body must contain one JSON object")
 	}
 	return nil

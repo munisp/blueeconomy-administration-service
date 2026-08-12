@@ -120,17 +120,7 @@ func (store *Store) RecordActivationResult(ctx context.Context, id, actorSubject
 		status = StatusActive
 		decision = "active"
 	}
-	command, err := store.pool.Exec(ctx, `UPDATE onboarding_requests SET status = $2 WHERE id = $1 AND status = 'activating'`, id, status)
-	if err != nil {
-		return fmt.Errorf("update activation status: %w", err)
-	}
-	if command.RowsAffected() != 1 {
-		return errors.New("onboarding request is not in activating state")
-	}
-	if _, err := store.pool.Exec(ctx, `INSERT INTO onboarding_decisions (request_id, decision, actor_subject, reason) VALUES ($1, $2, $3, $4)`, id, decision, actorSubject, reason); err != nil {
-		return fmt.Errorf("write activation decision: %w", err)
-	}
-	return nil
+	return store.recordExternalResult(ctx, id, actorSubject, StatusActivating, status, decision, reason)
 }
 
 func (store *Store) RecordProvisioningResult(ctx context.Context, id, actorSubject string, success bool, reason string) error {
@@ -138,15 +128,27 @@ func (store *Store) RecordProvisioningResult(ctx context.Context, id, actorSubje
 	if success {
 		status = StatusInvited
 	}
-	command, err := store.pool.Exec(ctx, `UPDATE onboarding_requests SET status = $2 WHERE id = $1 AND status = 'provisioning'`, id, status)
+	return store.recordExternalResult(ctx, id, actorSubject, StatusProvisioning, status, string(status), reason)
+}
+
+func (store *Store) recordExternalResult(ctx context.Context, id, actorSubject string, expectedStatus, nextStatus RequestStatus, decision, reason string) error {
+	transaction, err := store.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
-		return fmt.Errorf("update provisioning status: %w", err)
+		return fmt.Errorf("begin external-result transaction: %w", err)
+	}
+	defer func() { _ = transaction.Rollback(ctx) }()
+	command, err := transaction.Exec(ctx, `UPDATE onboarding_requests SET status = $3 WHERE id = $1 AND status = $2`, id, expectedStatus, nextStatus)
+	if err != nil {
+		return fmt.Errorf("update external-result status: %w", err)
 	}
 	if command.RowsAffected() != 1 {
-		return errors.New("onboarding request is not in approved state")
+		return fmt.Errorf("onboarding request is not in %q state", expectedStatus)
 	}
-	if _, err := store.pool.Exec(ctx, `INSERT INTO onboarding_decisions (request_id, decision, actor_subject, reason) VALUES ($1, $2, $3, $4)`, id, status, actorSubject, reason); err != nil {
-		return fmt.Errorf("write provisioning decision: %w", err)
+	if _, err := transaction.Exec(ctx, `INSERT INTO onboarding_decisions (request_id, decision, actor_subject, reason) VALUES ($1, $2, $3, $4)`, id, decision, actorSubject, reason); err != nil {
+		return fmt.Errorf("write external-result decision: %w", err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return fmt.Errorf("commit external-result transition: %w", err)
 	}
 	return nil
 }

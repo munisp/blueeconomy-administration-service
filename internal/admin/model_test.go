@@ -33,3 +33,17 @@ func TestSubmitInputAcceptsApprovedRole(t *testing.T) {
 		t.Fatalf("expected approved request to pass validation: %v", err)
 	}
 }
+
+func TestSubmitInputAcceptsConfiguredOrganization(t *testing.T) {
+	organizationID := "d6b44d5e-087e-47f4-8330-e36bd944f4c2"
+	input := SubmitInput{
+		OrganizationID: organizationID,
+		Email:          "stakeholder.local@blueeconomy.test",
+		FirstName:      "Local",
+		LastName:       "Stakeholder",
+		RequestedRoles: []string{"safety.telemetry.review"},
+	}
+	if err := input.Validate(organizationID, map[string]struct{}{"safety.telemetry.review": {}}); err != nil {
+		t.Fatalf("expected configured organization to be accepted: %v", err)
+	}
+}

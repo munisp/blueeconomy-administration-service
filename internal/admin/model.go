@@ -13,6 +13,7 @@ type RequestStatus string
 const (
 	StatusSubmitted          RequestStatus = "submitted"
 	StatusApproved           RequestStatus = "approved"
+	StatusProvisioning       RequestStatus = "provisioning"
 	StatusRejected           RequestStatus = "rejected"
 	StatusInvited            RequestStatus = "invited"
 	StatusActivating         RequestStatus = "activating"
