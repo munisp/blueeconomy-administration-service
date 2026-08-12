@@ -109,7 +109,7 @@ sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml
 sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml" exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U platform -d adminservice < "$root/db/migrations/0002_activation.sql"
 
-GOTOOLCHAIN=local go build -cover -coverpkg=./... -o "$integration/results/admin-service-bin" "$root/cmd/admin-service"
+(cd "$root" && GOTOOLCHAIN=local go build -cover -coverpkg=./... -o "$integration/results/admin-service-bin" ./cmd/admin-service)
 ADMIN_SERVICE_LISTEN_ADDRESS='127.0.0.1:18080' \
 ADMIN_SERVICE_POSTGRES_DSN="postgres://platform:$postgres_password@127.0.0.1:5432/adminservice?sslmode=disable" \
 KEYCLOAK_TOKEN_URL="$keycloak_base/realms/$realm/protocol/openid-connect/token" \
@@ -214,5 +214,8 @@ cat "$integration/results/local-integration-result.json"
 kill "$service_pid"
 wait "$service_pid"
 service_pid=""
-go tool covdata textfmt -i="$integration/results/go-coverage" -o="$integration/results/integration.cover.out"
-go tool cover -func="$integration/results/integration.cover.out" | tee "$integration/results/integration.coverage.txt"
+(
+  cd "$root"
+  go tool covdata textfmt -i="$integration/results/go-coverage" -o="$integration/results/integration.cover.out"
+  go tool cover -func="$integration/results/integration.cover.out" | tee "$integration/results/integration.coverage.txt"
+)
