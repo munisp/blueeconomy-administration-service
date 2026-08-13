@@ -109,7 +109,7 @@ sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml
 sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml" exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U platform -d adminservice < "$root/db/migrations/0002_activation.sql"
 
-(cd "$root" && GOTOOLCHAIN=local go build -cover -coverpkg=./... -o "$integration/results/admin-service-bin" ./cmd/admin-service)
+(cd "$root" && go build -cover -coverpkg=./... -o "$integration/results/admin-service-bin" ./cmd/admin-service)
 ADMIN_SERVICE_LISTEN_ADDRESS='127.0.0.1:18080' \
 ADMIN_SERVICE_POSTGRES_DSN="postgres://platform:$postgres_password@127.0.0.1:5432/adminservice?sslmode=disable" \
 KEYCLOAK_TOKEN_URL="$keycloak_base/realms/$realm/protocol/openid-connect/token" \

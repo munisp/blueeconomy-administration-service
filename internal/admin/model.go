@@ -43,6 +43,19 @@ type SubmitInput struct {
 	RequestedRoles []string `json:"requested_roles"`
 }
 
+func (input SubmitInput) Normalize() SubmitInput {
+	normalized := input
+	normalized.OrganizationID = strings.TrimSpace(input.OrganizationID)
+	normalized.Email = strings.TrimSpace(input.Email)
+	normalized.FirstName = strings.TrimSpace(input.FirstName)
+	normalized.LastName = strings.TrimSpace(input.LastName)
+	normalized.RequestedRoles = make([]string, len(input.RequestedRoles))
+	for index, role := range input.RequestedRoles {
+		normalized.RequestedRoles[index] = strings.TrimSpace(role)
+	}
+	return normalized
+}
+
 func (input SubmitInput) Validate(expectedOrganizationID string, allowedRoles map[string]struct{}) error {
 	if strings.TrimSpace(input.OrganizationID) == "" || input.OrganizationID != expectedOrganizationID {
 		return errors.New("organization_id is not an approved onboarding organization")

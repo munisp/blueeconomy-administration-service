@@ -53,7 +53,7 @@ func (service *HTTPService) submit(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	input.OrganizationID = strings.TrimSpace(input.OrganizationID)
+	input = input.Normalize()
 	if err := input.Validate(service.organizationID, service.allowedRoles); err != nil {
 		writeError(writer, http.StatusBadRequest, err)
 		return
