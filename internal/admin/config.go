@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -22,6 +23,13 @@ type Config struct {
 	ServiceActorSubject       string
 	AllowedRoles              map[string]struct{}
 	RoleGroupIDs              map[string]string
+	AuthMode                  string
+	OIDCIssuer                string
+	OIDCAudience              string
+	OIDCJWKSURL               *url.URL
+	OIDCCAFile                string
+	TrustedProxyIdentity      string
+	TrustedProxyCIDRs         []*net.IPNet
 }
 
 func LoadConfig() (Config, error) {
@@ -36,6 +44,11 @@ func LoadConfig() (Config, error) {
 		ServiceActorSubject:       strings.TrimSpace(os.Getenv("KEYCLOAK_SERVICE_ACTOR_SUBJECT")),
 		AllowedRoles:              make(map[string]struct{}),
 		RoleGroupIDs:              make(map[string]string),
+		AuthMode:                  strings.TrimSpace(os.Getenv("ADMIN_AUTH_MODE")),
+		OIDCIssuer:                strings.TrimSpace(os.Getenv("ADMIN_OIDC_ISSUER")),
+		OIDCAudience:              strings.TrimSpace(os.Getenv("ADMIN_OIDC_AUDIENCE")),
+		OIDCCAFile:                strings.TrimSpace(os.Getenv("ADMIN_OIDC_CA_FILE")),
+		TrustedProxyIdentity:      strings.TrimSpace(os.Getenv("ADMIN_TRUSTED_PROXY_IDENTITY")),
 	}
 	if config.ListenAddress == "" {
 		return Config{}, errors.New("ADMIN_SERVICE_LISTEN_ADDRESS is required")
@@ -43,7 +56,29 @@ func LoadConfig() (Config, error) {
 	if config.PostgresDSN == "" {
 		return Config{}, errors.New("ADMIN_SERVICE_POSTGRES_DSN is required")
 	}
+	if config.AuthMode == "" {
+		return Config{}, errors.New("ADMIN_AUTH_MODE is required and must be jwt or trusted_proxy")
+	}
 	var err error
+	switch config.AuthMode {
+	case "jwt":
+		if config.OIDCIssuer == "" || config.OIDCAudience == "" {
+			return Config{}, errors.New("ADMIN_OIDC_ISSUER and ADMIN_OIDC_AUDIENCE are required in jwt mode")
+		}
+		if config.OIDCJWKSURL, err = parseHTTPSURL("ADMIN_OIDC_JWKS_URL"); err != nil {
+			return Config{}, err
+		}
+	case "trusted_proxy":
+		if config.TrustedProxyIdentity == "" {
+			return Config{}, errors.New("ADMIN_TRUSTED_PROXY_IDENTITY is required in trusted_proxy mode")
+		}
+		config.TrustedProxyCIDRs, err = parseCIDRs(os.Getenv("ADMIN_TRUSTED_PROXY_CIDRS"))
+		if err != nil {
+			return Config{}, err
+		}
+	default:
+		return Config{}, errors.New("ADMIN_AUTH_MODE must be jwt or trusted_proxy")
+	}
 	if config.KeycloakTokenURL, err = parseHTTPSURL("KEYCLOAK_TOKEN_URL"); err != nil {
 		return Config{}, err
 	}
@@ -86,6 +121,25 @@ func LoadConfig() (Config, error) {
 		config.RoleGroupIDs[role] = groupID
 	}
 	return config, nil
+}
+
+func parseCIDRs(value string) ([]*net.IPNet, error) {
+	var networks []*net.IPNet
+	for _, raw := range strings.Split(strings.TrimSpace(value), ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		_, network, err := net.ParseCIDR(raw)
+		if err != nil {
+			return nil, fmt.Errorf("parse ADMIN_TRUSTED_PROXY_CIDRS entry %q: %w", raw, err)
+		}
+		networks = append(networks, network)
+	}
+	if len(networks) == 0 {
+		return nil, errors.New("ADMIN_TRUSTED_PROXY_CIDRS must contain one or more networks")
+	}
+	return networks, nil
 }
 
 func parseHTTPSURL(name string) (*url.URL, error) {

@@ -111,6 +111,9 @@ sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml
 
 (cd "$root" && go build -cover -coverpkg=./... -o "$integration/results/admin-service-bin" ./cmd/admin-service)
 ADMIN_SERVICE_LISTEN_ADDRESS='127.0.0.1:18080' \
+ADMIN_AUTH_MODE='trusted_proxy' \
+ADMIN_TRUSTED_PROXY_IDENTITY='local-integration' \
+ADMIN_TRUSTED_PROXY_CIDRS='127.0.0.1/32' \
 ADMIN_SERVICE_POSTGRES_DSN="postgres://platform:$postgres_password@127.0.0.1:5432/adminservice?sslmode=disable" \
 KEYCLOAK_TOKEN_URL="$keycloak_base/realms/$realm/protocol/openid-connect/token" \
 KEYCLOAK_ADMIN_BASE_URL="$keycloak_base" \
@@ -139,14 +142,14 @@ configured_organization="$(tr '\0' '\n' < "/proc/$service_pid/environ" | sed -n 
 
 echo 'integration stage: verify API denials and input controls' >&2
 [[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/onboarding/requests -H 'Content-Type: application/json' --data '{}')" == '401' ]]
-[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/onboarding/requests -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-Subject: local-requester' --data '{"undeclared":true}')" == '400' ]]
-[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/onboarding/requests -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-Subject: local-requester' --data "$(jq -nc --arg org "$organization_id" '{organization_id:$org,email:"unsupported.role@blueeconomy.test",first_name:"Unsupported",last_name:"Role",requested_roles:["undeclared.role"]}')")" == '400' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/onboarding/requests -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-requester' --data '{"undeclared":true}')" == '400' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/onboarding/requests -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-requester' --data "$(jq -nc --arg org "$organization_id" '{organization_id:$org,email:"unsupported.role@blueeconomy.test",first_name:"Unsupported",last_name:"Role",requested_roles:["undeclared.role"]}')")" == '400' ]]
 
 echo 'integration stage: submit onboarding request' >&2
 submit_response="$(mktemp)"
 submit_status="$(curl --silent --show-error -o "$submit_response" -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/onboarding/requests \
   -H 'Content-Type: application/json' \
-  -H 'X-Blueeconomy-Authenticated-Subject: local-requester' \
+  -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-requester' \
   --data "$(jq -nc --arg org "$organization_id" '{organization_id:$org,email:"stakeholder.local@blueeconomy.test",first_name:"Local",last_name:"Stakeholder",requested_roles:["safety.telemetry.review"]}')")"
 if [[ "$submit_status" != '201' ]]; then
   cat "$submit_response" >&2
@@ -160,19 +163,19 @@ request_status="$(jq -er '.status' <<<"$request_json")"
 [[ "$request_status" == 'submitted' ]]
 
 echo 'integration stage: verify maker/checker and decision validation' >&2
-[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/decision" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-Subject: local-requester' --data '{"decision":"approve","reason":"self approval must fail"}')" == '403' ]]
-[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/decision" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-Subject: local-approver' --data '{"decision":"defer","reason":"unsupported"}')" == '400' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/decision" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-requester' --data '{"decision":"approve","reason":"self approval must fail"}')" == '403' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/decision" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-approver' --data '{"decision":"defer","reason":"unsupported"}')" == '400' ]]
 
 echo 'integration stage: approve onboarding request' >&2
 curl --silent --show-error --fail -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/decision" \
-  -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-Subject: local-approver' \
+  -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-approver' \
   --data '{"decision":"approve","reason":"Local integration approval"}' | grep -qx '200'
 
 echo 'integration stage: provision Keycloak invitation' >&2
 [[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/provision")" == '401' ]]
 curl --silent --show-error --fail -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/provision" \
-  -H 'X-Blueeconomy-Authenticated-Subject: local-provisioner' | grep -qx '204'
-[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/provision" -H 'X-Blueeconomy-Authenticated-Subject: local-provisioner')" == '409' ]]
+  -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-provisioner' | grep -qx '204'
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/provision" -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-provisioner')" == '409' ]]
 
 mail_count="$(curl --silent --show-error --fail http://127.0.0.1:8025/api/v1/messages | jq -er '.messages | length')"
 [[ "$mail_count" -ge 1 ]]
@@ -184,11 +187,11 @@ curl "${ca[@]}" -o /dev/null -w '%{http_code}' -X POST "$admin_api/$realm/organi
   -H "Authorization: Bearer $master_token" -H 'Content-Type: application/json' --data "\"$user_id\"" | grep -qx '201'
 
 echo 'integration stage: activate Keycloak organization group' >&2
-[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/activate" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-Subject: local-activator' --data '{}')" == '400' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/activate" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-activator' --data '{}')" == '400' ]]
 curl --silent --show-error --fail -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/activate" \
-  -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-Subject: local-activator' \
+  -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-activator' \
   --data "$(jq -nc --arg user_id "$user_id" '{keycloak_user_id:$user_id}')" | grep -qx '204'
-[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/activate" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-Subject: local-activator' --data "$(jq -nc --arg user_id "$user_id" '{keycloak_user_id:$user_id}')")" == '409' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/activate" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-activator' --data "$(jq -nc --arg user_id "$user_id" '{keycloak_user_id:$user_id}')")" == '409' ]]
 
 final_status="$(sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml" exec -T postgres \
   psql -At -U platform -d adminservice -c "SELECT status FROM onboarding_requests WHERE id = '$request_id'" | tr -d '\r')"

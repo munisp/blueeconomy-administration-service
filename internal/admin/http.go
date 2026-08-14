@@ -16,6 +16,7 @@ type HTTPService struct {
 	organizationID string
 	allowedRoles   map[string]struct{}
 	serviceActor   string
+	authenticator  subjectAuthenticator
 }
 
 func NewHTTPService(store *Store, keycloak *KeycloakClient, config Config) *HTTPService {
@@ -25,6 +26,7 @@ func NewHTTPService(store *Store, keycloak *KeycloakClient, config Config) *HTTP
 		organizationID: config.KeycloakOrganizationID,
 		allowedRoles:   config.AllowedRoles,
 		serviceActor:   config.ServiceActorSubject,
+		authenticator:  newSubjectAuthenticator(config),
 	}
 }
 
@@ -43,7 +45,7 @@ func (service *HTTPService) health(writer http.ResponseWriter, _ *http.Request) 
 }
 
 func (service *HTTPService) submit(writer http.ResponseWriter, request *http.Request) {
-	subject, err := authenticatedSubject(request)
+	subject, err := service.authenticatedSubject(request)
 	if err != nil {
 		writeError(writer, http.StatusUnauthorized, err)
 		return
@@ -67,7 +69,7 @@ func (service *HTTPService) submit(writer http.ResponseWriter, request *http.Req
 }
 
 func (service *HTTPService) decide(writer http.ResponseWriter, request *http.Request) {
-	approver, err := authenticatedSubject(request)
+	approver, err := service.authenticatedSubject(request)
 	if err != nil {
 		writeError(writer, http.StatusUnauthorized, err)
 		return
@@ -97,7 +99,7 @@ func (service *HTTPService) decide(writer http.ResponseWriter, request *http.Req
 }
 
 func (service *HTTPService) activate(writer http.ResponseWriter, request *http.Request) {
-	if _, err := authenticatedSubject(request); err != nil {
+	if _, err := service.authenticatedSubject(request); err != nil {
 		writeError(writer, http.StatusUnauthorized, err)
 		return
 	}
@@ -128,7 +130,7 @@ func (service *HTTPService) activate(writer http.ResponseWriter, request *http.R
 }
 
 func (service *HTTPService) provision(writer http.ResponseWriter, request *http.Request) {
-	if _, err := authenticatedSubject(request); err != nil {
+	if _, err := service.authenticatedSubject(request); err != nil {
 		writeError(writer, http.StatusUnauthorized, err)
 		return
 	}
@@ -153,12 +155,18 @@ func (service *HTTPService) provision(writer http.ResponseWriter, request *http.
 	writeJSON(writer, http.StatusNoContent, nil)
 }
 
-func authenticatedSubject(request *http.Request) (string, error) {
-	subject := strings.TrimSpace(request.Header.Get("X-Blueeconomy-Authenticated-Subject"))
-	if subject == "" || len(subject) > 512 {
-		return "", errors.New("API-edge authenticated subject is required")
+func newSubjectAuthenticator(config Config) subjectAuthenticator {
+	if config.AuthMode == "jwt" {
+		return newOIDCAuthenticator(config)
 	}
-	return subject, nil
+	return trustedProxyAuthenticator{cidrs: config.TrustedProxyCIDRs, identity: config.TrustedProxyIdentity}
+}
+
+func (service *HTTPService) authenticatedSubject(request *http.Request) (string, error) {
+	if service.authenticator == nil {
+		return "", errors.New("authentication is not configured")
+	}
+	return service.authenticator.Subject(request)
 }
 
 func decodeJSON(request *http.Request, target any) error {
