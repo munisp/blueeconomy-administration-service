@@ -110,6 +110,8 @@ sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml
   psql -v ON_ERROR_STOP=1 -U platform -d adminservice < "$root/db/migrations/0002_activation.sql"
 sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml" exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U platform -d adminservice < "$root/db/migrations/0003_external_operations.sql"
+sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml" exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U platform -d adminservice < "$root/db/migrations/0004_privacy_governance.sql"
 
 (cd "$root" && go build -cover -coverpkg=./... -o "$integration/results/admin-service-bin" ./cmd/admin-service)
 ADMIN_SERVICE_LISTEN_ADDRESS='127.0.0.1:18080' \
@@ -210,13 +212,45 @@ group_members="$(curl "${ca[@]}" "$admin_api/$realm/organizations/$organization_
 member_found="$(jq --arg user_id "$user_id" 'map(.id) | index($user_id) != null' <<<"$group_members")"
 [[ "$member_found" == 'true' ]]
 
+echo 'integration stage: record and independently decide privacy processing activity' >&2
+privacy_evidence='sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+privacy_response="$(mktemp)"
+privacy_status="$(curl --silent --show-error -o "$privacy_response" -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/privacy/activities \
+  -H 'Content-Type: application/json' \
+  -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: privacy-requester' \
+  --data "$(jq -nc --arg evidence "$privacy_evidence" '{activity_key:"s2.incident.casework",service_name:"maritime.intelligence",purpose:"Controlled non-production privacy evidence workflow",data_classifications:["incident.casework","geospatial.limited"],external_recipients:["ministry.privacy.review"],evidence_sha256:$evidence,owner_subject:"privacy-owner"}')")"
+[[ "$privacy_status" == '201' ]] || { cat "$privacy_response" >&2; rm -f "$privacy_response"; exit 1; }
+privacy_activity="$(cat "$privacy_response")"
+rm -f "$privacy_response"
+privacy_id="$(jq -er '.id' <<<"$privacy_activity")"
+[[ "$(jq -er '.status' <<<"$privacy_activity")" == 'draft' ]]
+[[ "$(jq -er '.version' <<<"$privacy_activity")" == '1' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/privacy/activities/$privacy_id/attest" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: privacy-requester' --data "$(jq -nc --arg evidence "$privacy_evidence" '{expected_version:1,reason:"owner-only",evidence_sha256:$evidence}')")" == '403' ]]
+privacy_attested="$(curl --silent --show-error --fail -X POST "http://127.0.0.1:18080/v1/privacy/activities/$privacy_id/attest" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: privacy-owner' --data "$(jq -nc --arg evidence "$privacy_evidence" '{expected_version:1,reason:"owner attestation",evidence_sha256:$evidence}')")"
+[[ "$(jq -er '.status' <<<"$privacy_attested")" == 'owner_attested' ]]
+[[ "$(jq -er '.version' <<<"$privacy_attested")" == '2' ]]
+privacy_review="$(curl --silent --show-error --fail -X POST "http://127.0.0.1:18080/v1/privacy/activities/$privacy_id/submit-dpo-review" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: privacy-owner' --data "$(jq -nc --arg evidence "$privacy_evidence" '{expected_version:2,reason:"submit for DPO review",evidence_sha256:$evidence}')")"
+[[ "$(jq -er '.status' <<<"$privacy_review")" == 'dpo_review' ]]
+[[ "$(jq -er '.version' <<<"$privacy_review")" == '3' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/privacy/activities/$privacy_id/decision" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: privacy-owner' --data "$(jq -nc --arg evidence "$privacy_evidence" '{expected_version:3,decision:"approved",reason:"self decision",evidence_sha256:$evidence}')")" == '403' ]]
+expiry="$(date -u -d '+7 days' +%Y-%m-%dT%H:%M:%SZ)"
+privacy_decided="$(curl --silent --show-error --fail -X POST "http://127.0.0.1:18080/v1/privacy/activities/$privacy_id/decision" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: privacy-dpo-reviewer' --data "$(jq -nc --arg evidence "$privacy_evidence" --arg expiry "$expiry" '{expected_version:3,decision:"conditionally_approved",reason:"sandbox-only DPO condition",evidence_sha256:$evidence,approval_expires_at:$expiry}')")"
+[[ "$(jq -er '.status' <<<"$privacy_decided")" == 'conditionally_approved' ]]
+[[ "$(jq -er '.version' <<<"$privacy_decided")" == '4' ]]
+privacy_db_state="$(sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml" exec -T postgres psql -At -U platform -d adminservice -c "SELECT status::text || ':' || version::text FROM privacy_processing_activities WHERE id = '$privacy_id'" | tr -d '\r')"
+[[ "$privacy_db_state" == 'conditionally_approved:4' ]]
+privacy_decisions="$(sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml" exec -T postgres psql -At -U platform -d adminservice -c "SELECT string_agg(decision, ',' ORDER BY created_at) FROM privacy_activity_decisions WHERE activity_id = '$privacy_id'" | tr -d '\r')"
+[[ "$privacy_decisions" == 'owner_attested,dpo_review,conditionally_approved' ]]
+
 jq -n \
   --arg request_status "$request_status" \
   --arg final_status "$final_status" \
   --arg decisions "$decision_values" \
   --argjson mail_count "$mail_count" \
   --argjson group_member_found "$member_found" \
-  '{request_status:$request_status,final_status:$final_status,decisions:$decisions,mail_count:$mail_count,keycloak_group_member_found:$group_member_found}' \
+  --arg privacy_status "$(jq -er '.status' <<<"$privacy_decided")" \
+  --arg privacy_decisions "$privacy_decisions" \
+  '{request_status:$request_status,final_status:$final_status,decisions:$decisions,mail_count:$mail_count,keycloak_group_member_found:$group_member_found,privacy_status:$privacy_status,privacy_decisions:$privacy_decisions}' \
   > "$integration/results/local-integration-result.json"
 
 cat "$integration/results/local-integration-result.json"

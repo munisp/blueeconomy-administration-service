@@ -37,6 +37,11 @@ func (service *HTTPService) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/onboarding/requests/{id}/decision", service.decide)
 	mux.HandleFunc("POST /v1/onboarding/requests/{id}/provision", service.provision)
 	mux.HandleFunc("POST /v1/onboarding/requests/{id}/activate", service.activate)
+	mux.HandleFunc("POST /v1/privacy/activities", service.createPrivacyActivity)
+	mux.HandleFunc("GET /v1/privacy/activities/{id}", service.getPrivacyActivity)
+	mux.HandleFunc("POST /v1/privacy/activities/{id}/attest", service.attestPrivacyActivity)
+	mux.HandleFunc("POST /v1/privacy/activities/{id}/submit-dpo-review", service.submitPrivacyDPOReview)
+	mux.HandleFunc("POST /v1/privacy/activities/{id}/decision", service.decidePrivacyActivity)
 	return securityHeaders(mux)
 }
 
@@ -96,6 +101,127 @@ func (service *HTTPService) decide(writer http.ResponseWriter, request *http.Req
 		return
 	}
 	writeJSON(writer, http.StatusOK, result)
+}
+
+func (service *HTTPService) createPrivacyActivity(writer http.ResponseWriter, request *http.Request) {
+	requester, err := service.authenticatedSubject(request)
+	if err != nil {
+		writeError(writer, http.StatusUnauthorized, err)
+		return
+	}
+	var input CreatePrivacyActivityInput
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	input = input.Normalize()
+	if err := input.Validate(); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	activity, err := service.store.CreatePrivacyActivity(request.Context(), input, requester)
+	if err != nil {
+		writeError(writer, http.StatusConflict, errors.New("privacy activity could not be recorded"))
+		return
+	}
+	writeJSON(writer, http.StatusCreated, activity)
+}
+
+func (service *HTTPService) getPrivacyActivity(writer http.ResponseWriter, request *http.Request) {
+	if _, err := service.authenticatedSubject(request); err != nil {
+		writeError(writer, http.StatusUnauthorized, err)
+		return
+	}
+	activity, err := service.store.GetPrivacyActivity(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, http.StatusNotFound, errors.New("privacy activity was not found"))
+		return
+	}
+	writeJSON(writer, http.StatusOK, activity)
+}
+
+func (service *HTTPService) attestPrivacyActivity(writer http.ResponseWriter, request *http.Request) {
+	actor, err := service.authenticatedSubject(request)
+	if err != nil {
+		writeError(writer, http.StatusUnauthorized, err)
+		return
+	}
+	var input PrivacyWorkflowInput
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	input = input.Normalize()
+	if err := input.Validate(); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	activity, err := service.store.AttestPrivacyActivity(request.Context(), request.PathValue("id"), actor, input)
+	if err != nil {
+		if strings.Contains(err.Error(), "only the recorded") {
+			writeError(writer, http.StatusForbidden, err)
+			return
+		}
+		writeError(writer, http.StatusConflict, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, activity)
+}
+
+func (service *HTTPService) submitPrivacyDPOReview(writer http.ResponseWriter, request *http.Request) {
+	actor, err := service.authenticatedSubject(request)
+	if err != nil {
+		writeError(writer, http.StatusUnauthorized, err)
+		return
+	}
+	var input PrivacyWorkflowInput
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	input = input.Normalize()
+	if err := input.Validate(); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	activity, err := service.store.SubmitPrivacyDPOReview(request.Context(), request.PathValue("id"), actor, input)
+	if err != nil {
+		if strings.Contains(err.Error(), "only the recorded") {
+			writeError(writer, http.StatusForbidden, err)
+			return
+		}
+		writeError(writer, http.StatusConflict, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, activity)
+}
+
+func (service *HTTPService) decidePrivacyActivity(writer http.ResponseWriter, request *http.Request) {
+	actor, err := service.authenticatedSubject(request)
+	if err != nil {
+		writeError(writer, http.StatusUnauthorized, err)
+		return
+	}
+	var input PrivacyDecisionInput
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	input = input.Normalize()
+	if err := input.Validate(); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	activity, err := service.store.DecidePrivacyActivity(request.Context(), request.PathValue("id"), actor, input)
+	if err != nil {
+		if strings.Contains(err.Error(), "maker/checker") {
+			writeError(writer, http.StatusForbidden, err)
+			return
+		}
+		writeError(writer, http.StatusConflict, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, activity)
 }
 
 func (service *HTTPService) activate(writer http.ResponseWriter, request *http.Request) {
