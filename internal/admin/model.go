@@ -11,15 +11,17 @@ import (
 type RequestStatus string
 
 const (
-	StatusSubmitted          RequestStatus = "submitted"
-	StatusApproved           RequestStatus = "approved"
-	StatusProvisioning       RequestStatus = "provisioning"
-	StatusRejected           RequestStatus = "rejected"
-	StatusInvited            RequestStatus = "invited"
-	StatusActivating         RequestStatus = "activating"
-	StatusActivationFailed   RequestStatus = "activation_failed"
-	StatusActive             RequestStatus = "active"
-	StatusProvisioningFailed RequestStatus = "provisioning_failed"
+	StatusSubmitted             RequestStatus = "submitted"
+	StatusApproved              RequestStatus = "approved"
+	StatusProvisioning          RequestStatus = "provisioning"
+	StatusRejected              RequestStatus = "rejected"
+	StatusInvited               RequestStatus = "invited"
+	StatusActivating            RequestStatus = "activating"
+	StatusActivationFailed      RequestStatus = "activation_failed"
+	StatusActive                RequestStatus = "active"
+	StatusProvisioningFailed    RequestStatus = "provisioning_failed"
+	StatusProvisioningAmbiguous RequestStatus = "provisioning_ambiguous"
+	StatusActivationAmbiguous   RequestStatus = "activation_ambiguous"
 )
 
 type OnboardingRequest struct {

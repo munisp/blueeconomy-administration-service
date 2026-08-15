@@ -108,6 +108,8 @@ sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml
   psql -v ON_ERROR_STOP=1 -U platform -d adminservice < "$root/db/migrations/0001_onboarding.sql"
 sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml" exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U platform -d adminservice < "$root/db/migrations/0002_activation.sql"
+sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml" exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U platform -d adminservice < "$root/db/migrations/0003_external_operations.sql"
 
 (cd "$root" && go build -cover -coverpkg=./... -o "$integration/results/admin-service-bin" ./cmd/admin-service)
 ADMIN_SERVICE_LISTEN_ADDRESS='127.0.0.1:18080' \
@@ -199,6 +201,11 @@ final_status="$(sudo docker compose --env-file "$integration/.env" -f "$integrat
 decision_values="$(sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml" exec -T postgres \
   psql -At -U platform -d adminservice -c "SELECT string_agg(decision, ',' ORDER BY created_at) FROM onboarding_decisions WHERE request_id = '$request_id'" | tr -d '\r')"
 [[ "$decision_values" == 'approved,invited,active' ]]
+operation_values="$(sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml" exec -T postgres \
+  psql -At -U platform -d adminservice -c "SELECT string_agg(operation_kind::text || ':' || status::text, ',' ORDER BY operation_kind) FROM onboarding_external_operations WHERE request_id = '$request_id'" | tr -d '\r')"
+printf 'durable external operations: %s\n' "$operation_values" >&2
+[[ "$operation_values" == *'activate:succeeded'* ]]
+[[ "$operation_values" == *'provision:succeeded'* ]]
 group_members="$(curl "${ca[@]}" "$admin_api/$realm/organizations/$organization_id/groups/$group_id/members" -H "Authorization: Bearer $master_token")"
 member_found="$(jq --arg user_id "$user_id" 'map(.id) | index($user_id) != null' <<<"$group_members")"
 [[ "$member_found" == 'true' ]]

@@ -31,6 +31,7 @@ func main() {
 		log.Fatal(err)
 	}
 	service := admin.NewHTTPService(store, keycloakClient, config)
+	store.StartReconciler(lifecycleContext, config.ServiceActorSubject)
 	server := &http.Server{
 		Addr:              config.ListenAddress,
 		Handler:           service.Handler(),

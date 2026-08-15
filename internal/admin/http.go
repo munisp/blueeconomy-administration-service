@@ -110,7 +110,7 @@ func (service *HTTPService) activate(writer http.ResponseWriter, request *http.R
 		writeError(writer, http.StatusBadRequest, errors.New("a Keycloak user ID is required for activation"))
 		return
 	}
-	candidate, err := service.store.ClaimActivation(request.Context(), request.PathValue("id"))
+	candidate, err := service.store.ClaimActivation(request.Context(), request.PathValue("id"), strings.TrimSpace(input.KeycloakUserID))
 	if err != nil {
 		writeError(writer, http.StatusConflict, err)
 		return
