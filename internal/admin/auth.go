@@ -65,19 +65,14 @@ type oidcAuthenticator struct {
 	loadedAt time.Time
 }
 
-func newOIDCAuthenticator(config Config) *oidcAuthenticator {
+func newOIDCAuthenticator(config Config) (*oidcAuthenticator, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if config.OIDCCAFile != "" {
-		pemBytes, err := os.ReadFile(config.OIDCCAFile)
-		if err == nil {
-			pool, poolErr := x509.SystemCertPool()
-			if poolErr != nil || pool == nil {
-				pool = x509.NewCertPool()
-			}
-			if pool.AppendCertsFromPEM(pemBytes) {
-				transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
-			}
-		}
+	pool, err := oidcRootCAs(config.OIDCCAFile)
+	if err != nil {
+		return nil, err
+	}
+	if pool != nil {
+		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
 	return &oidcAuthenticator{
 		issuer:   config.OIDCIssuer,
@@ -85,7 +80,25 @@ func newOIDCAuthenticator(config Config) *oidcAuthenticator {
 		jwksURL:  config.OIDCJWKSURL,
 		client:   &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return errors.New("JWKS redirects are not permitted") }},
 		keys:     make(map[string]*rsa.PublicKey),
+	}, nil
+}
+
+func oidcRootCAs(path string) (*x509.CertPool, error) {
+	if path == "" {
+		return nil, nil
 	}
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read ADMIN_OIDC_CA_FILE: %w", err)
+	}
+	pool, poolErr := x509.SystemCertPool()
+	if poolErr != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, errors.New("ADMIN_OIDC_CA_FILE contains no valid PEM certificate")
+	}
+	return pool, nil
 }
 
 func (auth *oidcAuthenticator) Subject(request *http.Request) (string, error) {
