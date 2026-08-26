@@ -30,7 +30,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	service := admin.NewHTTPService(store, keycloakClient, config)
+	service, err := admin.NewHTTPService(store, keycloakClient, config)
+	if err != nil {
+		log.Fatal(err)
+	}
 	store.StartReconciler(lifecycleContext, config.ServiceActorSubject)
 	server := &http.Server{
 		Addr:              config.ListenAddress,

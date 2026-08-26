@@ -19,15 +19,19 @@ type HTTPService struct {
 	authenticator  subjectAuthenticator
 }
 
-func NewHTTPService(store *Store, keycloak *KeycloakClient, config Config) *HTTPService {
+func NewHTTPService(store *Store, keycloak *KeycloakClient, config Config) (*HTTPService, error) {
+	authenticator, err := newSubjectAuthenticator(config)
+	if err != nil {
+		return nil, err
+	}
 	return &HTTPService{
 		store:          store,
 		keycloak:       keycloak,
 		organizationID: config.KeycloakOrganizationID,
 		allowedRoles:   config.AllowedRoles,
 		serviceActor:   config.ServiceActorSubject,
-		authenticator:  newSubjectAuthenticator(config),
-	}
+		authenticator:  authenticator,
+	}, nil
 }
 
 func (service *HTTPService) Handler() http.Handler {
@@ -281,11 +285,11 @@ func (service *HTTPService) provision(writer http.ResponseWriter, request *http.
 	writeJSON(writer, http.StatusNoContent, nil)
 }
 
-func newSubjectAuthenticator(config Config) subjectAuthenticator {
+func newSubjectAuthenticator(config Config) (subjectAuthenticator, error) {
 	if config.AuthMode == "jwt" {
 		return newOIDCAuthenticator(config)
 	}
-	return trustedProxyAuthenticator{cidrs: config.TrustedProxyCIDRs, identity: config.TrustedProxyIdentity}
+	return trustedProxyAuthenticator{cidrs: config.TrustedProxyCIDRs, identity: config.TrustedProxyIdentity}, nil
 }
 
 func (service *HTTPService) authenticatedSubject(request *http.Request) (string, error) {
