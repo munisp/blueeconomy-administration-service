@@ -21,8 +21,16 @@ import (
 	"time"
 )
 
+// AuthenticatedIdentity is the verified caller identity: an immutable subject
+// plus the approved roles asserted by the credential. Roles may be empty; the
+// route authorizer denies roleless identities on every protected route.
+type AuthenticatedIdentity struct {
+	Subject string
+	Roles   map[string]struct{}
+}
+
 type subjectAuthenticator interface {
-	Subject(*http.Request) (string, error)
+	Authenticate(*http.Request) (AuthenticatedIdentity, error)
 }
 
 type trustedProxyAuthenticator struct {
@@ -30,14 +38,14 @@ type trustedProxyAuthenticator struct {
 	identity string
 }
 
-func (auth trustedProxyAuthenticator) Subject(request *http.Request) (string, error) {
+func (auth trustedProxyAuthenticator) Authenticate(request *http.Request) (AuthenticatedIdentity, error) {
 	remoteHost, _, err := net.SplitHostPort(strings.TrimSpace(request.RemoteAddr))
 	if err != nil {
 		remoteHost = strings.TrimSpace(request.RemoteAddr)
 	}
 	remoteIP := net.ParseIP(remoteHost)
 	if remoteIP == nil {
-		return "", errors.New("trusted proxy source address is invalid")
+		return AuthenticatedIdentity{}, errors.New("trusted proxy source address is invalid")
 	}
 	allowed := false
 	for _, network := range auth.cidrs {
@@ -47,22 +55,30 @@ func (auth trustedProxyAuthenticator) Subject(request *http.Request) (string, er
 		}
 	}
 	if !allowed {
-		return "", errors.New("request source is not an approved trusted proxy")
+		return AuthenticatedIdentity{}, errors.New("request source is not an approved trusted proxy")
 	}
 	if strings.TrimSpace(request.Header.Get("X-Blueeconomy-Authenticated-By")) != auth.identity {
-		return "", errors.New("trusted proxy identity is missing or invalid")
+		return AuthenticatedIdentity{}, errors.New("trusted proxy identity is missing or invalid")
 	}
-	return validatedSubject(request.Header.Get("X-Blueeconomy-Authenticated-Subject"))
+	subject, err := validatedSubject(request.Header.Get("X-Blueeconomy-Authenticated-Subject"))
+	if err != nil {
+		return AuthenticatedIdentity{}, err
+	}
+	return AuthenticatedIdentity{
+		Subject: subject,
+		Roles:   parseRoleHeader(request.Header.Get("X-Blueeconomy-Authenticated-Roles")),
+	}, nil
 }
 
 type oidcAuthenticator struct {
-	issuer   string
-	audience string
-	jwksURL  *url.URL
-	client   *http.Client
-	mu       sync.RWMutex
-	keys     map[string]*rsa.PublicKey
-	loadedAt time.Time
+	issuer         string
+	audience       string
+	jwksURL        *url.URL
+	rolesClientIDs []string
+	client         *http.Client
+	mu             sync.RWMutex
+	keys           map[string]*rsa.PublicKey
+	loadedAt       time.Time
 }
 
 func newOIDCAuthenticator(config Config) *oidcAuthenticator {
@@ -80,79 +96,111 @@ func newOIDCAuthenticator(config Config) *oidcAuthenticator {
 		}
 	}
 	return &oidcAuthenticator{
-		issuer:   config.OIDCIssuer,
-		audience: config.OIDCAudience,
-		jwksURL:  config.OIDCJWKSURL,
-		client:   &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return errors.New("JWKS redirects are not permitted") }},
-		keys:     make(map[string]*rsa.PublicKey),
+		issuer:         config.OIDCIssuer,
+		audience:       config.OIDCAudience,
+		jwksURL:        config.OIDCJWKSURL,
+		rolesClientIDs: config.OIDCRolesClientIDs,
+		client:         &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return errors.New("JWKS redirects are not permitted") }},
+		keys:           make(map[string]*rsa.PublicKey),
 	}
 }
 
-func (auth *oidcAuthenticator) Subject(request *http.Request) (string, error) {
+func (auth *oidcAuthenticator) Authenticate(request *http.Request) (AuthenticatedIdentity, error) {
 	value := strings.TrimSpace(request.Header.Get("Authorization"))
 	parts := strings.SplitN(value, " ", 2)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || strings.TrimSpace(parts[1]) == "" {
-		return "", errors.New("Bearer authorization is required")
+		return AuthenticatedIdentity{}, errors.New("Bearer authorization is required")
 	}
 	token := strings.TrimSpace(parts[1])
 	segments := strings.Split(token, ".")
 	if len(segments) != 3 || segments[0] == "" || segments[1] == "" || segments[2] == "" {
-		return "", errors.New("JWT compact serialization is invalid")
+		return AuthenticatedIdentity{}, errors.New("JWT compact serialization is invalid")
 	}
 	headerBytes, err := decodeBase64URL(segments[0])
 	if err != nil {
-		return "", errors.New("JWT header is invalid")
+		return AuthenticatedIdentity{}, errors.New("JWT header is invalid")
 	}
 	var header struct {
 		Alg string `json:"alg"`
 		Kid string `json:"kid"`
 	}
 	if err := json.Unmarshal(headerBytes, &header); err != nil || header.Alg != "RS256" || strings.TrimSpace(header.Kid) == "" {
-		return "", errors.New("JWT algorithm or key ID is invalid")
+		return AuthenticatedIdentity{}, errors.New("JWT algorithm or key ID is invalid")
 	}
 	key, err := auth.key(header.Kid, true)
 	if err != nil {
-		return "", err
+		return AuthenticatedIdentity{}, err
 	}
 	signature, err := decodeBase64URL(segments[2])
 	if err != nil {
-		return "", errors.New("JWT signature is invalid")
+		return AuthenticatedIdentity{}, errors.New("JWT signature is invalid")
 	}
 	digest := sha256.Sum256([]byte(segments[0] + "." + segments[1]))
 	if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], signature); err != nil {
-		return "", errors.New("JWT signature verification failed")
+		return AuthenticatedIdentity{}, errors.New("JWT signature verification failed")
 	}
 	payloadBytes, err := decodeBase64URL(segments[1])
 	if err != nil {
-		return "", errors.New("JWT claims are invalid")
+		return AuthenticatedIdentity{}, errors.New("JWT claims are invalid")
 	}
-	var claims struct {
-		Issuer    string          `json:"iss"`
-		Subject   string          `json:"sub"`
-		Audience  json.RawMessage `json:"aud"`
-		Expires   json.Number     `json:"exp"`
-		NotBefore json.Number     `json:"nbf"`
-	}
+	var claims tokenClaims
 	decoder := json.NewDecoder(strings.NewReader(string(payloadBytes)))
 	decoder.UseNumber()
 	if err := decoder.Decode(&claims); err != nil {
-		return "", errors.New("JWT claims are invalid")
+		return AuthenticatedIdentity{}, errors.New("JWT claims are invalid")
 	}
 	if claims.Issuer != auth.issuer || !audienceContains(claims.Audience, auth.audience) {
-		return "", errors.New("JWT issuer or audience is invalid")
+		return AuthenticatedIdentity{}, errors.New("JWT issuer or audience is invalid")
 	}
 	now := time.Now().Unix()
 	expires, err := claims.Expires.Int64()
 	if err != nil || now >= expires {
-		return "", errors.New("JWT is expired or has no valid expiry")
+		return AuthenticatedIdentity{}, errors.New("JWT is expired or has no valid expiry")
 	}
 	if claims.NotBefore != "" {
 		notBefore, parseErr := claims.NotBefore.Int64()
 		if parseErr != nil || now < notBefore {
-			return "", errors.New("JWT is not yet valid")
+			return AuthenticatedIdentity{}, errors.New("JWT is not yet valid")
 		}
 	}
-	return validatedSubject(claims.Subject)
+	subject, err := validatedSubject(claims.Subject)
+	if err != nil {
+		return AuthenticatedIdentity{}, err
+	}
+	return AuthenticatedIdentity{Subject: subject, Roles: auth.extractRoles(claims)}, nil
+}
+
+// tokenClaims are the verified JWT claims, including the Keycloak role
+// claims: realm roles via realm_access.roles always, and resource (client)
+// roles via resource_access[client].roles only for configured client IDs.
+type tokenClaims struct {
+	Issuer      string          `json:"iss"`
+	Subject     string          `json:"sub"`
+	Audience    json.RawMessage `json:"aud"`
+	Expires     json.Number     `json:"exp"`
+	NotBefore   json.Number     `json:"nbf"`
+	RealmAccess struct {
+		Roles []string `json:"roles"`
+	} `json:"realm_access"`
+	ResourceAccess map[string]struct {
+		Roles []string `json:"roles"`
+	} `json:"resource_access"`
+}
+
+// extractRoles collects the approved realm roles and, for each configured
+// resource client ID, the client roles asserted by the token.
+func (auth *oidcAuthenticator) extractRoles(claims tokenClaims) map[string]struct{} {
+	roles := normalizeRoles(claims.RealmAccess.Roles)
+	for _, clientID := range auth.rolesClientIDs {
+		access, ok := claims.ResourceAccess[clientID]
+		if !ok {
+			continue
+		}
+		for role := range normalizeRoles(access.Roles) {
+			roles[role] = struct{}{}
+		}
+	}
+	return roles
 }
 
 func (auth *oidcAuthenticator) key(kid string, refresh bool) (*rsa.PublicKey, error) {

@@ -88,12 +88,16 @@ func (input SubmitInput) Validate(expectedOrganizationID string, allowedRoles ma
 	return nil
 }
 
+// ErrMakerCheckerViolation marks any maker/checker separation-of-duties
+// rejection so HTTP handlers can map it to 403 without string matching.
+var ErrMakerCheckerViolation = errors.New("maker/checker violation")
+
 func CanApprove(requesterSubject, approverSubject string) error {
 	if strings.TrimSpace(requesterSubject) == "" || strings.TrimSpace(approverSubject) == "" {
 		return errors.New("requester and approver subjects are required")
 	}
 	if requesterSubject == approverSubject {
-		return errors.New("maker/checker violation: requester cannot approve their own onboarding request")
+		return fmt.Errorf("%w: requester cannot approve their own onboarding request", ErrMakerCheckerViolation)
 	}
 	return nil
 }

@@ -4,14 +4,29 @@ This Go service provides the approval-controlled backend for Ministry user and s
 
 ## API-edge identity boundary
 
-The service is intended to run behind the approved API edge. The API edge must validate OIDC tokens, enforce route roles and inject `X-Blueeconomy-Authenticated-Subject` only after successful authentication. The service must not be internet-accessible directly, because it trusts this protected upstream identity assertion. Mutual network identity and API-edge route policy are mandatory deployment controls.
+The service is intended to run behind the approved API edge. Mutual network identity and API-edge route policy remain mandatory deployment controls, but the service **enforces its own service-side authorization** and never relies on the edge alone.
 
-| Method and path | Required upstream role | Function |
+In `jwt` mode the service validates RS256 bearer tokens against the configured JWKS and reads roles from the token claims. In `trusted_proxy` mode the approved API edge must validate OIDC tokens and inject `X-Blueeconomy-Authenticated-Subject` **and** `X-Blueeconomy-Authenticated-Roles` (comma-separated) only after successful authentication; the service verifies the trusted proxy source and identity header before accepting either assertion. The service must not be internet-accessible directly in `trusted_proxy` mode.
+
+### Role claim mapping
+
+Roles are Keycloak realm roles. In `jwt` mode they are read from the token's `realm_access.roles` claim and, additionally, from `resource_access[<client>].roles` for each client ID listed in `ADMIN_OIDC_ROLES_CLIENT_IDS`. Roles of any other client are ignored. A token with no role claim is authenticated but denied (403) on every protected route.
+
+Approved realm roles: `platform-admin`, `nimasa-officer`, `nwa-officer`, `niwa-officer`, `cbn-observer`, `fmmbe-oversight`, `independent-auditor`, `icrc-observer`.
+
+Authorization is fail-closed and default-deny: any route not in the policy table receives 403, and the read-only oversight roles (`cbn-observer`, `fmmbe-oversight`, `independent-auditor`, `icrc-observer`) are generically denied every mutating endpoint regardless of the route table.
+
+| Method and path | Allowed roles | Function |
 |---|---|---|
-| `POST /v1/onboarding/requests` | `stakeholder.onboarding.request` | Record a request for an approved organization and allowed roles. |
-| `POST /v1/onboarding/requests/{id}/decision` | `stakeholder.onboarding.approve` | Approve or reject a request; self-approval is rejected. |
-| `POST /v1/onboarding/requests/{id}/provision` | Dedicated provisioning approval policy | Claim one approved request and call the documented Keycloak organization invitation endpoint. |
-| `POST /v1/onboarding/requests/{id}/activate` | Dedicated activation approval policy | After invitation/registration, atomically activate the request and assign only the approved Keycloak organization groups for its role set. |
+| `POST /v1/onboarding/requests` | `platform-admin`, `nimasa-officer`, `nwa-officer`, `niwa-officer` | Record a request for an approved organization and allowed roles. |
+| `POST /v1/onboarding/requests/{id}/decision` | `platform-admin`, `nimasa-officer` | Approve or reject a request; self-approval is rejected. |
+| `POST /v1/onboarding/requests/{id}/provision` | `platform-admin`, `nimasa-officer` | Claim one approved request and call the documented Keycloak organization invitation endpoint. |
+| `POST /v1/onboarding/requests/{id}/activate` | `platform-admin`, `nimasa-officer` | After invitation/registration, atomically activate the request and assign only the approved Keycloak organization groups for its role set. |
+| `POST /v1/privacy/activities` | `platform-admin`, `nimasa-officer`, `nwa-officer`, `niwa-officer` | Record a privacy processing activity in draft. |
+| `GET /v1/privacy/activities/{id}` | All eight approved roles | Read one privacy processing activity (the only route open to oversight roles). |
+| `POST /v1/privacy/activities/{id}/attest` | `platform-admin`, `nimasa-officer`, `nwa-officer`, `niwa-officer` | Recorded owner attests the draft activity. |
+| `POST /v1/privacy/activities/{id}/submit-dpo-review` | `platform-admin`, `nimasa-officer`, `nwa-officer`, `niwa-officer` | Recorded owner submits the attested activity for DPO review. |
+| `POST /v1/privacy/activities/{id}/decision` | `platform-admin`, `nimasa-officer` | Independent DPO decision; requester/owner self-decision is rejected. |
 | `GET /healthz` | Network-restricted operational probe | Report process health only. |
 
 ## Required configuration
@@ -28,6 +43,7 @@ All configuration must be supplied by the approved deployment/secret mechanism. 
 | `KEYCLOAK_ADMIN_CLIENT_ID` and `KEYCLOAK_ADMIN_CLIENT_SECRET` | Dedicated least-privilege confidential client credentials. |
 | `KEYCLOAK_SERVICE_ACTOR_SUBJECT` | Immutable non-human actor reference recorded for provisioning results. |
 | `ONBOARDING_ALLOWED_ROLES` | Comma-separated approved service-role catalogue. |
+| `ADMIN_OIDC_ROLES_CLIENT_IDS` | Optional comma-separated Keycloak client IDs whose `resource_access` roles are trusted in `jwt` mode, in addition to `realm_access.roles`. |
 | `KEYCLOAK_ROLE_GROUP_MAPPING_JSON` | Non-secret JSON map from each approved role to its actual approved Keycloak organization group ID. |
 
 The Keycloak client uses client credentials and invokes the documented organization `invite-user` administrative operation after an atomic PostgreSQL claim. After an authorised invitation/registration result is available, the activation endpoint maps the request’s approved roles to the configured Keycloak organization groups using the documented organization group-membership operation. It sends no account password, raw OIDC user token, refresh token or secret to the database or its HTTP response.

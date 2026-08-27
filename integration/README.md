@@ -15,13 +15,14 @@ Docker must be available. The suite requires `curl`, `jq`, `openssl`, Go, and Do
 
 The script proves this ordered path against actual local components:
 
-1. A requester submits a persisted onboarding request to the Go service.
-2. A distinct actor approves it, satisfying the service maker/checker guard.
-3. The service acquires a Keycloak service-account token through HTTPS and invokes Keycloak organization invitation.
-4. Keycloak sends an invitation message to the local SMTP service; the suite verifies one or more captured messages.
-5. The suite creates the local fixture user through Keycloak, associates it with the local organization, then calls the service activation endpoint.
-6. The service maps the approved role to the actual local Keycloak organization group.
-7. PostgreSQL shows the immutable decision sequence `approved,invited,active`, final state `active`, and Keycloak reports the fixture user in the expected organization group.
+1. Service-side authorization denials: an authenticated subject with no role assertion receives 403, a read-only observer role receives 403 on a mutating route, and an unknown route receives 403.
+2. A requester submits a persisted onboarding request to the Go service.
+3. A distinct actor approves it, satisfying the service maker/checker guard.
+4. The service acquires a Keycloak service-account token through HTTPS and invokes Keycloak organization invitation.
+5. Keycloak sends an invitation message to the local SMTP service; the suite verifies one or more captured messages.
+6. The suite creates the local fixture user through Keycloak, associates it with the local organization, then calls the service activation endpoint.
+7. The service maps the approved role to the actual local Keycloak organization group.
+8. PostgreSQL shows the immutable decision sequence `approved,invited,active`, final state `active`, and Keycloak reports the fixture user in the expected organization group.
 
 ## Boundary
 

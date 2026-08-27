@@ -28,6 +28,7 @@ type Config struct {
 	OIDCAudience              string
 	OIDCJWKSURL               *url.URL
 	OIDCCAFile                string
+	OIDCRolesClientIDs        []string
 	TrustedProxyIdentity      string
 	TrustedProxyCIDRs         []*net.IPNet
 }
@@ -67,6 +68,16 @@ func LoadConfig() (Config, error) {
 		}
 		if config.OIDCJWKSURL, err = parseHTTPSURL("ADMIN_OIDC_JWKS_URL"); err != nil {
 			return Config{}, err
+		}
+		for _, clientID := range strings.Split(strings.TrimSpace(os.Getenv("ADMIN_OIDC_ROLES_CLIENT_IDS")), ",") {
+			clientID = strings.TrimSpace(clientID)
+			if clientID == "" {
+				continue
+			}
+			if len(clientID) > 255 {
+				return Config{}, errors.New("ADMIN_OIDC_ROLES_CLIENT_IDS entries must be at most 255 characters")
+			}
+			config.OIDCRolesClientIDs = append(config.OIDCRolesClientIDs, clientID)
 		}
 	case "trusted_proxy":
 		if config.TrustedProxyIdentity == "" {

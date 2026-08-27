@@ -8,6 +8,11 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// ErrPrivacyActorNotOwner marks transitions attempted by a subject other than
+// the recorded privacy activity owner, so HTTP handlers can map it to 403
+// without string matching.
+var ErrPrivacyActorNotOwner = errors.New("only the recorded privacy activity owner may perform this transition")
+
 func (store *Store) CreatePrivacyActivity(ctx context.Context, input CreatePrivacyActivityInput, requesterSubject string) (PrivacyProcessingActivity, error) {
 	if err := validateSubject("requester_subject", requesterSubject); err != nil {
 		return PrivacyProcessingActivity{}, err
@@ -61,7 +66,7 @@ func (store *Store) AttestPrivacyActivity(ctx context.Context, id, actorSubject 
 		return PrivacyProcessingActivity{}, errors.New("privacy activity is not at the expected draft version")
 	}
 	if actorSubject != activity.OwnerSubject {
-		return PrivacyProcessingActivity{}, errors.New("only the recorded privacy activity owner may attest")
+		return PrivacyProcessingActivity{}, fmt.Errorf("%w: attestation rejected", ErrPrivacyActorNotOwner)
 	}
 	return transitionPrivacyActivity(ctx, transaction, activity, PrivacyActivityOwnerAttested, actorSubject, input.Reason, input.EvidenceSHA256, "", nil)
 }
@@ -83,7 +88,7 @@ func (store *Store) SubmitPrivacyDPOReview(ctx context.Context, id, actorSubject
 		return PrivacyProcessingActivity{}, errors.New("privacy activity is not at the expected owner-attested version")
 	}
 	if actorSubject != activity.OwnerSubject {
-		return PrivacyProcessingActivity{}, errors.New("only the recorded privacy activity owner may submit DPO review")
+		return PrivacyProcessingActivity{}, fmt.Errorf("%w: DPO review submission rejected", ErrPrivacyActorNotOwner)
 	}
 	return transitionPrivacyActivity(ctx, transaction, activity, PrivacyActivityDPOReview, actorSubject, input.Reason, input.EvidenceSHA256, "", nil)
 }
@@ -105,7 +110,7 @@ func (store *Store) DecidePrivacyActivity(ctx context.Context, id, actorSubject 
 		return PrivacyProcessingActivity{}, errors.New("privacy activity is not at the expected DPO-review version")
 	}
 	if actorSubject == activity.RequesterSubject || actorSubject == activity.OwnerSubject {
-		return PrivacyProcessingActivity{}, errors.New("maker/checker violation: requester or owner cannot make the DPO decision")
+		return PrivacyProcessingActivity{}, fmt.Errorf("%w: requester or owner cannot make the DPO decision", ErrMakerCheckerViolation)
 	}
 	status := PrivacyActivityStatus(input.Decision)
 	conditions := ""

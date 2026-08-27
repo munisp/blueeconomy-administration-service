@@ -146,14 +146,19 @@ configured_organization="$(tr '\0' '\n' < "/proc/$service_pid/environ" | sed -n 
 
 echo 'integration stage: verify API denials and input controls' >&2
 [[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/onboarding/requests -H 'Content-Type: application/json' --data '{}')" == '401' ]]
-[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/onboarding/requests -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-requester' --data '{"undeclared":true}')" == '400' ]]
-[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/onboarding/requests -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-requester' --data "$(jq -nc --arg org "$organization_id" '{organization_id:$org,email:"unsupported.role@blueeconomy.test",first_name:"Unsupported",last_name:"Role",requested_roles:["undeclared.role"]}')")" == '400' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/onboarding/requests -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-requester' -H 'X-Blueeconomy-Authenticated-Roles: nimasa-officer' --data '{"undeclared":true}')" == '400' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/onboarding/requests -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-requester' -H 'X-Blueeconomy-Authenticated-Roles: nimasa-officer' --data "$(jq -nc --arg org "$organization_id" '{organization_id:$org,email:"unsupported.role@blueeconomy.test",first_name:"Unsupported",last_name:"Role",requested_roles:["undeclared.role"]}')")" == '400' ]]
+
+echo 'integration stage: verify service-side authorization denials' >&2
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/onboarding/requests -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: roleless-subject' --data '{}')" == '403' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/onboarding/requests -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: observer-subject' -H 'X-Blueeconomy-Authenticated-Roles: icrc-observer' --data '{}')" == '403' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/v1/unknown-route -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-requester' -H 'X-Blueeconomy-Authenticated-Roles: platform-admin')" == '403' ]]
 
 echo 'integration stage: submit onboarding request' >&2
 submit_response="$(mktemp)"
 submit_status="$(curl --silent --show-error -o "$submit_response" -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/onboarding/requests \
   -H 'Content-Type: application/json' \
-  -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-requester' \
+  -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-requester' -H 'X-Blueeconomy-Authenticated-Roles: nimasa-officer' \
   --data "$(jq -nc --arg org "$organization_id" '{organization_id:$org,email:"stakeholder.local@blueeconomy.test",first_name:"Local",last_name:"Stakeholder",requested_roles:["safety.telemetry.review"]}')")"
 if [[ "$submit_status" != '201' ]]; then
   cat "$submit_response" >&2
@@ -167,19 +172,19 @@ request_status="$(jq -er '.status' <<<"$request_json")"
 [[ "$request_status" == 'submitted' ]]
 
 echo 'integration stage: verify maker/checker and decision validation' >&2
-[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/decision" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-requester' --data '{"decision":"approve","reason":"self approval must fail"}')" == '403' ]]
-[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/decision" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-approver' --data '{"decision":"defer","reason":"unsupported"}')" == '400' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/decision" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-requester' -H 'X-Blueeconomy-Authenticated-Roles: nimasa-officer' --data '{"decision":"approve","reason":"self approval must fail"}')" == '403' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/decision" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-approver' -H 'X-Blueeconomy-Authenticated-Roles: nimasa-officer' --data '{"decision":"defer","reason":"unsupported"}')" == '400' ]]
 
 echo 'integration stage: approve onboarding request' >&2
 curl --silent --show-error --fail -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/decision" \
-  -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-approver' \
+  -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-approver' -H 'X-Blueeconomy-Authenticated-Roles: nimasa-officer' \
   --data '{"decision":"approve","reason":"Local integration approval"}' | grep -qx '200'
 
 echo 'integration stage: provision Keycloak invitation' >&2
 [[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/provision")" == '401' ]]
 curl --silent --show-error --fail -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/provision" \
-  -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-provisioner' | grep -qx '204'
-[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/provision" -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-provisioner')" == '409' ]]
+  -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-provisioner' -H 'X-Blueeconomy-Authenticated-Roles: platform-admin' | grep -qx '204'
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/provision" -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-provisioner' -H 'X-Blueeconomy-Authenticated-Roles: platform-admin')" == '409' ]]
 
 mail_count="$(curl --silent --show-error --fail http://127.0.0.1:8025/api/v1/messages | jq -er '.messages | length')"
 [[ "$mail_count" -ge 1 ]]
@@ -191,11 +196,11 @@ curl "${ca[@]}" -o /dev/null -w '%{http_code}' -X POST "$admin_api/$realm/organi
   -H "Authorization: Bearer $master_token" -H 'Content-Type: application/json' --data "\"$user_id\"" | grep -qx '201'
 
 echo 'integration stage: activate Keycloak organization group' >&2
-[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/activate" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-activator' --data '{}')" == '400' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/activate" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-activator' -H 'X-Blueeconomy-Authenticated-Roles: platform-admin' --data '{}')" == '400' ]]
 curl --silent --show-error --fail -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/activate" \
-  -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-activator' \
+  -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-activator' -H 'X-Blueeconomy-Authenticated-Roles: platform-admin' \
   --data "$(jq -nc --arg user_id "$user_id" '{keycloak_user_id:$user_id}')" | grep -qx '204'
-[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/activate" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-activator' --data "$(jq -nc --arg user_id "$user_id" '{keycloak_user_id:$user_id}')")" == '409' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/onboarding/requests/$request_id/activate" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: local-activator' -H 'X-Blueeconomy-Authenticated-Roles: platform-admin' --data "$(jq -nc --arg user_id "$user_id" '{keycloak_user_id:$user_id}')")" == '409' ]]
 
 final_status="$(sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml" exec -T postgres \
   psql -At -U platform -d adminservice -c "SELECT status FROM onboarding_requests WHERE id = '$request_id'" | tr -d '\r')"
@@ -217,7 +222,7 @@ privacy_evidence='sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 privacy_response="$(mktemp)"
 privacy_status="$(curl --silent --show-error -o "$privacy_response" -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/privacy/activities \
   -H 'Content-Type: application/json' \
-  -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: privacy-requester' \
+  -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: privacy-requester' -H 'X-Blueeconomy-Authenticated-Roles: nwa-officer' \
   --data "$(jq -nc --arg evidence "$privacy_evidence" '{activity_key:"s2.incident.casework",service_name:"maritime.intelligence",purpose:"Controlled non-production privacy evidence workflow",data_classifications:["incident.casework","geospatial.limited"],external_recipients:["ministry.privacy.review"],evidence_sha256:$evidence,owner_subject:"privacy-owner"}')")"
 [[ "$privacy_status" == '201' ]] || { cat "$privacy_response" >&2; rm -f "$privacy_response"; exit 1; }
 privacy_activity="$(cat "$privacy_response")"
@@ -225,16 +230,16 @@ rm -f "$privacy_response"
 privacy_id="$(jq -er '.id' <<<"$privacy_activity")"
 [[ "$(jq -er '.status' <<<"$privacy_activity")" == 'draft' ]]
 [[ "$(jq -er '.version' <<<"$privacy_activity")" == '1' ]]
-[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/privacy/activities/$privacy_id/attest" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: privacy-requester' --data "$(jq -nc --arg evidence "$privacy_evidence" '{expected_version:1,reason:"owner-only",evidence_sha256:$evidence}')")" == '403' ]]
-privacy_attested="$(curl --silent --show-error --fail -X POST "http://127.0.0.1:18080/v1/privacy/activities/$privacy_id/attest" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: privacy-owner' --data "$(jq -nc --arg evidence "$privacy_evidence" '{expected_version:1,reason:"owner attestation",evidence_sha256:$evidence}')")"
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/privacy/activities/$privacy_id/attest" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: privacy-requester' -H 'X-Blueeconomy-Authenticated-Roles: nwa-officer' --data "$(jq -nc --arg evidence "$privacy_evidence" '{expected_version:1,reason:"owner-only",evidence_sha256:$evidence}')")" == '403' ]]
+privacy_attested="$(curl --silent --show-error --fail -X POST "http://127.0.0.1:18080/v1/privacy/activities/$privacy_id/attest" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: privacy-owner' -H 'X-Blueeconomy-Authenticated-Roles: nwa-officer,platform-admin' --data "$(jq -nc --arg evidence "$privacy_evidence" '{expected_version:1,reason:"owner attestation",evidence_sha256:$evidence}')")"
 [[ "$(jq -er '.status' <<<"$privacy_attested")" == 'owner_attested' ]]
 [[ "$(jq -er '.version' <<<"$privacy_attested")" == '2' ]]
-privacy_review="$(curl --silent --show-error --fail -X POST "http://127.0.0.1:18080/v1/privacy/activities/$privacy_id/submit-dpo-review" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: privacy-owner' --data "$(jq -nc --arg evidence "$privacy_evidence" '{expected_version:2,reason:"submit for DPO review",evidence_sha256:$evidence}')")"
+privacy_review="$(curl --silent --show-error --fail -X POST "http://127.0.0.1:18080/v1/privacy/activities/$privacy_id/submit-dpo-review" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: privacy-owner' -H 'X-Blueeconomy-Authenticated-Roles: nwa-officer,platform-admin' --data "$(jq -nc --arg evidence "$privacy_evidence" '{expected_version:2,reason:"submit for DPO review",evidence_sha256:$evidence}')")"
 [[ "$(jq -er '.status' <<<"$privacy_review")" == 'dpo_review' ]]
 [[ "$(jq -er '.version' <<<"$privacy_review")" == '3' ]]
-[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/privacy/activities/$privacy_id/decision" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: privacy-owner' --data "$(jq -nc --arg evidence "$privacy_evidence" '{expected_version:3,decision:"approved",reason:"self decision",evidence_sha256:$evidence}')")" == '403' ]]
+[[ "$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18080/v1/privacy/activities/$privacy_id/decision" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: privacy-owner' -H 'X-Blueeconomy-Authenticated-Roles: nwa-officer,platform-admin' --data "$(jq -nc --arg evidence "$privacy_evidence" '{expected_version:3,decision:"approved",reason:"self decision",evidence_sha256:$evidence}')")" == '403' ]]
 expiry="$(date -u -d '+7 days' +%Y-%m-%dT%H:%M:%SZ)"
-privacy_decided="$(curl --silent --show-error --fail -X POST "http://127.0.0.1:18080/v1/privacy/activities/$privacy_id/decision" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: privacy-dpo-reviewer' --data "$(jq -nc --arg evidence "$privacy_evidence" --arg expiry "$expiry" '{expected_version:3,decision:"conditionally_approved",reason:"sandbox-only DPO condition",evidence_sha256:$evidence,approval_expires_at:$expiry}')")"
+privacy_decided="$(curl --silent --show-error --fail -X POST "http://127.0.0.1:18080/v1/privacy/activities/$privacy_id/decision" -H 'Content-Type: application/json' -H 'X-Blueeconomy-Authenticated-By: local-integration' -H 'X-Blueeconomy-Authenticated-Subject: privacy-dpo-reviewer' -H 'X-Blueeconomy-Authenticated-Roles: platform-admin' --data "$(jq -nc --arg evidence "$privacy_evidence" --arg expiry "$expiry" '{expected_version:3,decision:"conditionally_approved",reason:"sandbox-only DPO condition",evidence_sha256:$evidence,approval_expires_at:$expiry}')")"
 [[ "$(jq -er '.status' <<<"$privacy_decided")" == 'conditionally_approved' ]]
 [[ "$(jq -er '.version' <<<"$privacy_decided")" == '4' ]]
 privacy_db_state="$(sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml" exec -T postgres psql -At -U platform -d adminservice -c "SELECT status::text || ':' || version::text FROM privacy_processing_activities WHERE id = '$privacy_id'" | tr -d '\r')"

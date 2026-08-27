@@ -32,17 +32,14 @@ func NewHTTPService(store *Store, keycloak *KeycloakClient, config Config) *HTTP
 
 func (service *HTTPService) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", service.health)
-	mux.HandleFunc("POST /v1/onboarding/requests", service.submit)
-	mux.HandleFunc("POST /v1/onboarding/requests/{id}/decision", service.decide)
-	mux.HandleFunc("POST /v1/onboarding/requests/{id}/provision", service.provision)
-	mux.HandleFunc("POST /v1/onboarding/requests/{id}/activate", service.activate)
-	mux.HandleFunc("POST /v1/privacy/activities", service.createPrivacyActivity)
-	mux.HandleFunc("GET /v1/privacy/activities/{id}", service.getPrivacyActivity)
-	mux.HandleFunc("POST /v1/privacy/activities/{id}/attest", service.attestPrivacyActivity)
-	mux.HandleFunc("POST /v1/privacy/activities/{id}/submit-dpo-review", service.submitPrivacyDPOReview)
-	mux.HandleFunc("POST /v1/privacy/activities/{id}/decision", service.decidePrivacyActivity)
-	return securityHeaders(mux)
+	for pattern, policy := range service.routes() {
+		if len(policy.allowedRoles) == 0 {
+			mux.HandleFunc(pattern, policy.handler)
+			continue
+		}
+		mux.HandleFunc(pattern, service.requireRoles(policy.allowedRoles, policy.handler))
+	}
+	return securityHeaders(service.defaultDeny(mux))
 }
 
 func (service *HTTPService) health(writer http.ResponseWriter, _ *http.Request) {
@@ -93,7 +90,7 @@ func (service *HTTPService) decide(writer http.ResponseWriter, request *http.Req
 	}
 	result, err := service.store.Decide(request.Context(), request.PathValue("id"), approver, input.Decision, strings.TrimSpace(input.Reason))
 	if err != nil {
-		if strings.Contains(err.Error(), "maker/checker") {
+		if errors.Is(err, ErrMakerCheckerViolation) {
 			writeError(writer, http.StatusForbidden, err)
 			return
 		}
@@ -158,7 +155,7 @@ func (service *HTTPService) attestPrivacyActivity(writer http.ResponseWriter, re
 	}
 	activity, err := service.store.AttestPrivacyActivity(request.Context(), request.PathValue("id"), actor, input)
 	if err != nil {
-		if strings.Contains(err.Error(), "only the recorded") {
+		if errors.Is(err, ErrPrivacyActorNotOwner) {
 			writeError(writer, http.StatusForbidden, err)
 			return
 		}
@@ -186,7 +183,7 @@ func (service *HTTPService) submitPrivacyDPOReview(writer http.ResponseWriter, r
 	}
 	activity, err := service.store.SubmitPrivacyDPOReview(request.Context(), request.PathValue("id"), actor, input)
 	if err != nil {
-		if strings.Contains(err.Error(), "only the recorded") {
+		if errors.Is(err, ErrPrivacyActorNotOwner) {
 			writeError(writer, http.StatusForbidden, err)
 			return
 		}
@@ -214,7 +211,7 @@ func (service *HTTPService) decidePrivacyActivity(writer http.ResponseWriter, re
 	}
 	activity, err := service.store.DecidePrivacyActivity(request.Context(), request.PathValue("id"), actor, input)
 	if err != nil {
-		if strings.Contains(err.Error(), "maker/checker") {
+		if errors.Is(err, ErrMakerCheckerViolation) {
 			writeError(writer, http.StatusForbidden, err)
 			return
 		}
@@ -289,10 +286,11 @@ func newSubjectAuthenticator(config Config) subjectAuthenticator {
 }
 
 func (service *HTTPService) authenticatedSubject(request *http.Request) (string, error) {
-	if service.authenticator == nil {
-		return "", errors.New("authentication is not configured")
+	identity, err := service.identity(request)
+	if err != nil {
+		return "", err
 	}
-	return service.authenticator.Subject(request)
+	return identity.Subject, nil
 }
 
 func decodeJSON(request *http.Request, target any) error {
