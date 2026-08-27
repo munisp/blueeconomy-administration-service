@@ -48,14 +48,14 @@ func isMutating(method string) bool {
 func TestRoutePolicyRoleMatrix(t *testing.T) {
 	service := &HTTPService{}
 	routes := service.routes()
-	if len(routes) != 10 {
+	if len(routes) != 11 {
 		t.Fatalf("route table changed without a policy review: %d routes", len(routes))
 	}
 	for pattern, policy := range routes {
 		method, _, _ := strings.Cut(pattern, " ")
 		if len(policy.allowedRoles) == 0 {
-			if pattern != "GET /healthz" {
-				t.Fatalf("route %s has no role policy and is not the health probe", pattern)
+			if pattern != "GET /healthz" && pattern != "GET /readyz" {
+				t.Fatalf("route %s has no role policy and is not an operational probe", pattern)
 			}
 			continue
 		}

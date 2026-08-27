@@ -8,6 +8,11 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/munisp/blueeconomy-administration-service/internal/telemetry"
 )
 
 type HTTPService struct {
@@ -17,6 +22,7 @@ type HTTPService struct {
 	allowedRoles   map[string]struct{}
 	serviceActor   string
 	authenticator  subjectAuthenticator
+	telemetry      *telemetry.Telemetry
 }
 
 func NewHTTPService(store *Store, keycloak *KeycloakClient, config Config) *HTTPService {
@@ -30,6 +36,13 @@ func NewHTTPService(store *Store, keycloak *KeycloakClient, config Config) *HTTP
 	}
 }
 
+// Instrument attaches the OpenTelemetry/Prometheus pipeline. It is required
+// for GET /metrics and request tracing; without it the service still serves
+// every application route uninstrumented (tests only).
+func (service *HTTPService) Instrument(pipeline *telemetry.Telemetry) {
+	service.telemetry = pipeline
+}
+
 func (service *HTTPService) Handler() http.Handler {
 	mux := http.NewServeMux()
 	for pattern, policy := range service.routes() {
@@ -39,11 +52,32 @@ func (service *HTTPService) Handler() http.Handler {
 		}
 		mux.HandleFunc(pattern, service.requireRoles(policy.allowedRoles, policy.handler))
 	}
-	return securityHeaders(service.defaultDeny(mux))
+	if service.telemetry != nil {
+		mux.Handle("GET /metrics", service.telemetry.MetricsHandler())
+	}
+	handler := http.Handler(securityHeaders(service.defaultDeny(mux)))
+	if service.telemetry != nil {
+		handler = service.telemetry.Middleware(handler)
+	}
+	return handler
 }
 
 func (service *HTTPService) health(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// readyz verifies the PostgreSQL evidence store is reachable; it fails closed
+// when no store is configured.
+func (service *HTTPService) readyz(writer http.ResponseWriter, request *http.Request) {
+	if service.store == nil {
+		writeError(writer, http.StatusServiceUnavailable, errors.New("evidence store is not configured"))
+		return
+	}
+	if err := service.store.Ping(request.Context()); err != nil {
+		writeError(writer, http.StatusServiceUnavailable, errors.New("evidence store is not reachable"))
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 func (service *HTTPService) submit(writer http.ResponseWriter, request *http.Request) {
@@ -88,6 +122,10 @@ func (service *HTTPService) decide(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusBadRequest, errors.New("decision must be approve or reject"))
 		return
 	}
+	trace.SpanFromContext(request.Context()).SetAttributes(
+		attribute.String("admin.onboarding.request_id", request.PathValue("id")),
+		attribute.String("admin.onboarding.decision", input.Decision),
+	)
 	result, err := service.store.Decide(request.Context(), request.PathValue("id"), approver, input.Decision, strings.TrimSpace(input.Reason))
 	if err != nil {
 		if errors.Is(err, ErrMakerCheckerViolation) {
@@ -290,6 +328,7 @@ func (service *HTTPService) authenticatedSubject(request *http.Request) (string,
 	if err != nil {
 		return "", err
 	}
+	trace.SpanFromContext(request.Context()).SetAttributes(attribute.String("admin.authenticated_subject", identity.Subject))
 	return identity.Subject, nil
 }
 

@@ -31,6 +31,11 @@ func (store *Store) Close() {
 	store.pool.Close()
 }
 
+// Ping verifies the evidence database is reachable for readiness probes.
+func (store *Store) Ping(ctx context.Context) error {
+	return store.pool.Ping(ctx)
+}
+
 func (store *Store) StartReconciler(ctx context.Context, actorSubject string) {
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)

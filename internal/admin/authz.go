@@ -60,6 +60,7 @@ var (
 func (service *HTTPService) routes() map[string]routePolicy {
 	return map[string]routePolicy{
 		"GET /healthz":                                       {handler: service.health},
+		"GET /readyz":                                        {handler: service.readyz},
 		"POST /v1/onboarding/requests":                       {handler: service.submit, allowedRoles: onboardingOperatorRoles},
 		"POST /v1/onboarding/requests/{id}/decision":         {handler: service.decide, allowedRoles: onboardingApproverRoles},
 		"POST /v1/onboarding/requests/{id}/provision":        {handler: service.provision, allowedRoles: onboardingApproverRoles},

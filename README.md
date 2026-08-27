@@ -28,6 +28,19 @@ Authorization is fail-closed and default-deny: any route not in the policy table
 | `POST /v1/privacy/activities/{id}/submit-dpo-review` | `platform-admin`, `nimasa-officer`, `nwa-officer`, `niwa-officer` | Recorded owner submits the attested activity for DPO review. |
 | `POST /v1/privacy/activities/{id}/decision` | `platform-admin`, `nimasa-officer` | Independent DPO decision; requester/owner self-decision is rejected. |
 | `GET /healthz` | Network-restricted operational probe | Report process health only. |
+| `GET /readyz` | Network-restricted operational probe | Report readiness; fails closed (503) when the PostgreSQL evidence store is unreachable. |
+| `GET /metrics` | Network-restricted operational probe | Prometheus scrape endpoint (request count and duration by method, route and status). |
+
+## Telemetry
+
+The service emits OpenTelemetry traces and Prometheus metrics from `internal/telemetry`. Metrics are always local-only and served on `GET /metrics`; tracing is **disabled by default** and runs with an explicit no-op tracer (a startup log line states the mode). Setting `OTEL_EXPORTER_OTLP_ENDPOINT` enables OTLP gRPC trace export. Telemetry configuration follows the service's fail-closed posture: a malformed endpoint, an unrecognised boolean, or `OTEL_SDK_DISABLED=true` combined with an endpoint is a startup error.
+
+| Variable | Purpose |
+|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Optional OTLP gRPC collector as `host:port` (no scheme, credentials or path). Unset means tracing disabled. |
+| `OTEL_EXPORTER_OTLP_INSECURE` | Optional `true`/`false`; plaintext gRPC to the collector. Defaults to TLS. |
+| `OTEL_SERVICE_NAME` | Optional service name override (defaults to `blueeconomy-administration-service`). |
+| `OTEL_SDK_DISABLED` | Optional `true` to force-disable tracing; must not be combined with an endpoint. |
 
 ## Required configuration
 
