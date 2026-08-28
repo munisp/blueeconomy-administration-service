@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"github.com/munisp/blueeconomy-administration-service/internal/pbac"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,10 @@ type HTTPService struct {
 	authenticator       subjectAuthenticator
 	rateLimiter         enrollmentRateLimiter
 	enrollmentRateLimit int
+	// pbac is the embedded-OPA authorization gate on privileged routes;
+	// tenantLookup resolves resource tenants for policy evaluation.
+	pbac         *pbac.Engine
+	tenantLookup onboardingTenantLookup
 }
 
 // enrollmentRateLimiter is the strict fixed-window limiter guarding the
@@ -38,7 +43,14 @@ func NewHTTPService(store *Store, keycloak *KeycloakClient, config Config) *HTTP
 		authenticator:       newSubjectAuthenticator(config),
 		rateLimiter:         store,
 		enrollmentRateLimit: config.EnrollmentRateLimitPerMinute,
+		tenantLookup:        store,
 	}
+}
+
+// SetPBACEngine attaches the embedded-OPA authorization engine. Privileged
+// routes deny every request until an engine is attached (fail-closed).
+func (service *HTTPService) SetPBACEngine(engine *pbac.Engine) {
+	service.pbac = engine
 }
 
 func (service *HTTPService) Handler() http.Handler {
@@ -48,7 +60,11 @@ func (service *HTTPService) Handler() http.Handler {
 			mux.HandleFunc(pattern, policy.handler)
 			continue
 		}
-		mux.HandleFunc(pattern, service.requireRoles(policy.allowedRoles, policy.handler))
+		handler := policy.handler
+		if policy.pbacAction != "" {
+			handler = service.requirePBAC(policy.pbacAction, handler)
+		}
+		mux.HandleFunc(pattern, service.requireRoles(policy.allowedRoles, handler))
 	}
 	return securityHeaders(service.defaultDeny(mux))
 }

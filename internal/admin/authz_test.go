@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -14,9 +15,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/munisp/blueeconomy-administration-service/internal/pbac"
 )
 
 var allRealmRoles = []string{
@@ -128,10 +132,25 @@ func (stub stubAuthenticator) Authenticate(*http.Request) (AuthenticatedIdentity
 	return stub.identity, stub.err
 }
 
+// stubTenantLookup resolves every onboarding request to the stub tenant so
+// the PBAC middleware has a deterministic resource tenant.
+type stubTenantLookup struct{}
+
+func (stubTenantLookup) OnboardingRequestTenant(context.Context, string) (string, error) {
+	return "stub-tenant", nil
+}
+
 func newStubService(roles ...string) *HTTPService {
-	return &HTTPService{
-		authenticator: stubAuthenticator{identity: AuthenticatedIdentity{Subject: "stub-subject", Roles: roleSet(roles...)}},
+	service := &HTTPService{
+		authenticator: stubAuthenticator{identity: AuthenticatedIdentity{Subject: "stub-subject", Roles: roleSet(roles...), TenantID: "stub-tenant"}},
+		tenantLookup:  stubTenantLookup{},
 	}
+	engine, err := pbac.LoadPolicyDir(filepath.Join("..", "..", "policies"))
+	if err != nil {
+		panic(err)
+	}
+	service.SetPBACEngine(engine)
+	return service
 }
 
 // TestUnknownRouteIsDenied proves the default-deny wrapper: paths outside the

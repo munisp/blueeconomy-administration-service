@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/munisp/blueeconomy-administration-service/internal/admin"
+	"github.com/munisp/blueeconomy-administration-service/internal/pbac"
+	"github.com/munisp/blueeconomy-administration-service/internal/provenance"
 )
 
 func main() {
@@ -26,11 +28,25 @@ func main() {
 	}
 	defer store.Close()
 
+	// Fail-closed startup: without the producer provenance key no onboarding
+	// outbox envelope may be emitted, and without the PBAC policy engine no
+	// privileged route may authorize — the process refuses to run at all.
+	signer, err := provenance.LoadSignerFromEnv(admin.SigningKeyID)
+	if err != nil {
+		log.Fatal(err)
+	}
+	store.WithSigner(signer)
+	policyEngine, err := pbac.LoadPolicyDir(config.PBACPolicyDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	keycloakClient, err := admin.NewKeycloakClient(config)
 	if err != nil {
 		log.Fatal(err)
 	}
 	service := admin.NewHTTPService(store, keycloakClient, config)
+	service.SetPBACEngine(policyEngine)
 	store.StartReconciler(lifecycleContext, config.ServiceActorSubject)
 	server := &http.Server{
 		Addr:              config.ListenAddress,

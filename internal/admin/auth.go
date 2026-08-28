@@ -27,6 +27,13 @@ import (
 type AuthenticatedIdentity struct {
 	Subject string
 	Roles   map[string]struct{}
+	// TenantID is the tenant/agency the principal operates in (JWT
+	// tenant_id claim or the trusted-proxy X-Blueeconomy-Tenant-ID header).
+	// Empty means tenant-less; tenant-scoped policy rules then deny.
+	TenantID string
+	// Clearance is the national-security clearance label asserted for the
+	// principal (JWT clearance claim or X-Blueeconomy-Clearance header).
+	Clearance string
 }
 
 type subjectAuthenticator interface {
@@ -64,10 +71,38 @@ func (auth trustedProxyAuthenticator) Authenticate(request *http.Request) (Authe
 	if err != nil {
 		return AuthenticatedIdentity{}, err
 	}
+	tenantID, err := validatedAssertion("X-Blueeconomy-Tenant-ID", request.Header.Get("X-Blueeconomy-Tenant-ID"), 256)
+	if err != nil {
+		return AuthenticatedIdentity{}, err
+	}
+	clearance, err := validatedAssertion("X-Blueeconomy-Clearance", request.Header.Get("X-Blueeconomy-Clearance"), 64)
+	if err != nil {
+		return AuthenticatedIdentity{}, err
+	}
 	return AuthenticatedIdentity{
-		Subject: subject,
-		Roles:   parseRoleHeader(request.Header.Get("X-Blueeconomy-Authenticated-Roles")),
+		Subject:   subject,
+		Roles:     parseRoleHeader(request.Header.Get("X-Blueeconomy-Authenticated-Roles")),
+		TenantID:  tenantID,
+		Clearance: clearance,
 	}, nil
+}
+
+// validatedAssertion canonicalizes an optional identity assertion header:
+// empty is allowed (tenant-less/unlabelled principals), malformed values are
+// rejected rather than silently trusted.
+func validatedAssertion(name, value string, limit int) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	if len(value) > limit || strings.TrimSpace(value) != value {
+		return "", errors.New(name + " is not canonical text")
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return "", errors.New(name + " must not contain control characters")
+		}
+	}
+	return value, nil
 }
 
 type oidcAuthenticator struct {
@@ -167,7 +202,15 @@ func (auth *oidcAuthenticator) Authenticate(request *http.Request) (Authenticate
 	if err != nil {
 		return AuthenticatedIdentity{}, err
 	}
-	return AuthenticatedIdentity{Subject: subject, Roles: auth.extractRoles(claims)}, nil
+	tenantID, err := validatedAssertion("tenant_id claim", claims.TenantID, 256)
+	if err != nil {
+		return AuthenticatedIdentity{}, err
+	}
+	clearance, err := validatedAssertion("clearance claim", claims.Clearance, 64)
+	if err != nil {
+		return AuthenticatedIdentity{}, err
+	}
+	return AuthenticatedIdentity{Subject: subject, Roles: auth.extractRoles(claims), TenantID: tenantID, Clearance: clearance}, nil
 }
 
 // tokenClaims are the verified JWT claims, including the Keycloak role
@@ -176,6 +219,8 @@ func (auth *oidcAuthenticator) Authenticate(request *http.Request) (Authenticate
 type tokenClaims struct {
 	Issuer      string          `json:"iss"`
 	Subject     string          `json:"sub"`
+	TenantID    string          `json:"tenant_id"`
+	Clearance   string          `json:"clearance"`
 	Audience    json.RawMessage `json:"aud"`
 	Expires     json.Number     `json:"exp"`
 	NotBefore   json.Number     `json:"nbf"`

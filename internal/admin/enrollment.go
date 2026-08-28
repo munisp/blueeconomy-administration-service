@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"github.com/munisp/blueeconomy-administration-service/internal/provenance"
 	"context"
 	"encoding/json"
 	"errors"
@@ -122,8 +123,12 @@ func (store *Store) RecordIdentityVerification(ctx context.Context, id, officerS
 // insertActivationNotice emits the platform-envelope outbox event for a
 // completed activation and marks the request notification as pending. It runs
 // inside the activation transaction, so an activation can never be recorded
-// without its notification event.
-func insertActivationNotice(ctx context.Context, transaction pgx.Tx, requestID, principal string) error {
+// without its notification event. The notice is sealed with the fleet
+// provenance signature; without a signer the activation fails closed.
+func insertActivationNotice(ctx context.Context, transaction pgx.Tx, signer *provenance.Signer, requestID, principal string) error {
+	if signer == nil {
+		return errors.New("provenance signer is required")
+	}
 	const loadQuery = `
 	SELECT id::text, organization_id, email, first_name, last_name, requested_roles, requester_subject, status, persona, contact_channel, contact_reference, notification_status, created_at, updated_at
 	FROM onboarding_requests WHERE id = $1`
@@ -132,14 +137,19 @@ func insertActivationNotice(ctx context.Context, transaction pgx.Tx, requestID, 
 		return fmt.Errorf("load activated request: %w", err)
 	}
 	notice := NewActivationNotice(request, principal, time.Now().UTC())
+	signature, err := signer.SignEnvelope(notice)
+	if err != nil {
+		return fmt.Errorf("sign activation notice provenance: %w", err)
+	}
+	notice.Provenance.Signature = signature
 	payload, err := json.Marshal(notice.Payload)
 	if err != nil {
 		return fmt.Errorf("encode activation notice payload: %w", err)
 	}
 	const insertQuery = `
-	INSERT INTO onboarding_outbox_events (request_id, topic, event_type, classification, provenance_principal, payload)
-	VALUES ($1, $2, $3, $4, $5, $6)`
-	if _, err := transaction.Exec(ctx, insertQuery, requestID, notice.Topic, notice.EventType, notice.Classification, notice.ProvenancePrincipal, payload); err != nil {
+	INSERT INTO onboarding_outbox_events (request_id, topic, event_type, classification, provenance_principal, provenance_signature, payload)
+	VALUES ($1, $2, $3, $4, $5, $6, $7)`
+	if _, err := transaction.Exec(ctx, insertQuery, requestID, notice.Topic, notice.EventType, notice.Classification, notice.ProvenancePrincipal, notice.Provenance.Signature, payload); err != nil {
 		return fmt.Errorf("write activation outbox event: %w", err)
 	}
 	if _, err := transaction.Exec(ctx, `UPDATE onboarding_requests SET notification_status = $2 WHERE id = $1`, requestID, NotificationPending); err != nil {
@@ -173,7 +183,7 @@ func (store *Store) ClaimOutboxEvents(ctx context.Context, limit, maxAttempts in
 		LIMIT $1
 		FOR UPDATE SKIP LOCKED
 	)
-	RETURNING id::text, request_id::text, topic, event_type, classification, provenance_principal, payload, status, attempt, created_at`
+	RETURNING id::text, request_id::text, topic, event_type, classification, provenance_principal, provenance_signature, payload, status, attempt, created_at`
 	rows, err := store.pool.Query(ctx, query, limit, maxAttempts)
 	if err != nil {
 		return nil, fmt.Errorf("claim outbox events: %w", err)
@@ -189,6 +199,7 @@ func (store *Store) ClaimOutboxEvents(ctx context.Context, limit, maxAttempts in
 			&event.EventType,
 			&event.Classification,
 			&event.ProvenancePrincipal,
+			&event.Signature,
 			&event.Payload,
 			&event.Status,
 			&event.Attempt,

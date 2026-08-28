@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"github.com/munisp/blueeconomy-administration-service/internal/provenance"
 	"context"
 	"errors"
 	"fmt"
@@ -12,7 +13,16 @@ import (
 )
 
 type Store struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	signer *provenance.Signer
+}
+
+// WithSigner attaches the provenance signer used to seal every emitted
+// onboarding outbox envelope. Emission paths fail closed when no signer is
+// attached.
+func (store *Store) WithSigner(signer *provenance.Signer) *Store {
+	store.signer = signer
+	return store
 }
 
 func NewStore(ctx context.Context, dsn string) (*Store, error) {
@@ -25,6 +35,20 @@ func NewStore(ctx context.Context, dsn string) (*Store, error) {
 		return nil, fmt.Errorf("ping PostgreSQL: %w", err)
 	}
 	return &Store{pool: pool}, nil
+}
+
+// OnboardingRequestTenant resolves the owning organization (tenant) of one
+// onboarding request for policy evaluation. Unknown ids return ErrNotFound.
+func (store *Store) OnboardingRequestTenant(ctx context.Context, id string) (string, error) {
+	var organizationID string
+	err := store.pool.QueryRow(ctx, `SELECT organization_id FROM onboarding_requests WHERE id = $1`, id).Scan(&organizationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("load onboarding request tenant: %w", err)
+	}
+	return organizationID, nil
 }
 
 func (store *Store) Close() {
@@ -192,7 +216,7 @@ func (store *Store) recordExternalResult(ctx context.Context, id, actorSubject, 
 		return fmt.Errorf("write external-result decision: %w", err)
 	}
 	if operationKind == "activate" && nextStatus == StatusActive {
-		if err := insertActivationNotice(ctx, transaction, id, actorSubject); err != nil {
+		if err := insertActivationNotice(ctx, transaction, store.signer, id, actorSubject); err != nil {
 			return fmt.Errorf("record activation notice: %w", err)
 		}
 	}

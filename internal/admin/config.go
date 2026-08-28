@@ -33,6 +33,7 @@ type Config struct {
 	TrustedProxyIdentity         string
 	TrustedProxyCIDRs            []*net.IPNet
 	EnrollmentRateLimitPerMinute int
+	PBACPolicyDir                string
 }
 
 func LoadConfig() (Config, error) {
@@ -58,6 +59,10 @@ func LoadConfig() (Config, error) {
 	}
 	if config.PostgresDSN == "" {
 		return Config{}, errors.New("ADMIN_SERVICE_POSTGRES_DSN is required")
+	}
+	config.PBACPolicyDir = strings.TrimSpace(os.Getenv("ADMIN_PBAC_POLICY_DIR"))
+	if config.PBACPolicyDir == "" {
+		return Config{}, errors.New("ADMIN_PBAC_POLICY_DIR is required; policy-based authorization is mandatory (fail-closed)")
 	}
 	if config.AuthMode == "" {
 		return Config{}, errors.New("ADMIN_AUTH_MODE is required and must be jwt or trusted_proxy")

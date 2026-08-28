@@ -47,6 +47,9 @@ type routePolicy struct {
 	handler      http.HandlerFunc
 	allowedRoles []string
 	public       bool
+	// pbacAction, when non-empty, additionally gates the route through the
+	// embedded-OPA PBAC middleware with this policy action.
+	pbacAction string
 }
 
 var (
@@ -64,9 +67,9 @@ func (service *HTTPService) routes() map[string]routePolicy {
 	return map[string]routePolicy{
 		"GET /healthz":                                       {handler: service.health, public: true},
 		"POST /v1/onboarding/requests":                       {handler: service.submit, allowedRoles: onboardingOperatorRoles},
-		"POST /v1/onboarding/requests/{id}/decision":         {handler: service.decide, allowedRoles: onboardingApproverRoles},
-		"POST /v1/onboarding/requests/{id}/provision":        {handler: service.provision, allowedRoles: onboardingApproverRoles},
-		"POST /v1/onboarding/requests/{id}/activate":         {handler: service.activate, allowedRoles: onboardingApproverRoles},
+		"POST /v1/onboarding/requests/{id}/decision":         {handler: service.decide, allowedRoles: onboardingApproverRoles, pbacAction: "decide"},
+		"POST /v1/onboarding/requests/{id}/provision":        {handler: service.provision, allowedRoles: onboardingApproverRoles, pbacAction: "provision"},
+		"POST /v1/onboarding/requests/{id}/activate":         {handler: service.activate, allowedRoles: onboardingApproverRoles, pbacAction: "activate"},
 		"POST /v1/privacy/activities":                        {handler: service.createPrivacyActivity, allowedRoles: onboardingOperatorRoles},
 		"GET /v1/privacy/activities/{id}":                    {handler: service.getPrivacyActivity, allowedRoles: privacyReaderRoles},
 		"POST /v1/privacy/activities/{id}/attest":            {handler: service.attestPrivacyActivity, allowedRoles: onboardingOperatorRoles},

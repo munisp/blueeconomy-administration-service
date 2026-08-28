@@ -101,6 +101,9 @@ func (input SubmitInput) Validate(expectedOrganizationID string, allowedRoles ma
 // rejection so HTTP handlers can map it to 403 without string matching.
 var ErrMakerCheckerViolation = errors.New("maker/checker violation")
 
+// ErrNotFound marks a missing onboarding record.
+var ErrNotFound = errors.New("onboarding request not found")
+
 func CanApprove(requesterSubject, approverSubject string) error {
 	if strings.TrimSpace(requesterSubject) == "" || strings.TrimSpace(approverSubject) == "" {
 		return errors.New("requester and approver subjects are required")
@@ -580,6 +583,11 @@ type EnrollmentBatchRow struct {
 	RequestID *string `json:"request_id,omitempty"`
 }
 
+// SigningKeyID is the provenance key id this service signs onboarding
+// outbox envelopes with; consumers resolve the matching public key from the
+// fleet key directory.
+const SigningKeyID = "admin-service-1"
+
 // Outbox contract for the activation notification. The notifier (USSD/SMS
 // gateway) is a separate platform component; this service owns only the
 // event envelope and the delivery status tracking.
@@ -619,6 +627,12 @@ type ActivationNotice struct {
 	Classification      string                  `json:"classification"`
 	ProvenancePrincipal string                  `json:"provenance_principal"`
 	Payload             ActivationNoticePayload `json:"payload"`
+	// Provenance.Signature is the fleet provenance scheme: a JWS compact
+	// serialization (EdDSA/Ed25519) over the JCS-canonicalized (RFC 8785)
+	// JSON of the full notice excluding the signature field.
+	Provenance struct {
+		Signature string `json:"signature"`
+	} `json:"provenance"`
 }
 
 // NewActivationNotice maps an activated request onto the platform envelope.
@@ -655,6 +669,7 @@ type OutboxEvent struct {
 	EventType           string          `json:"event_type"`
 	Classification      string          `json:"classification"`
 	ProvenancePrincipal string          `json:"provenance_principal"`
+	Signature           string          `json:"signature"`
 	Payload             json.RawMessage `json:"payload"`
 	Status              string          `json:"status"`
 	Attempt             int             `json:"attempt"`
