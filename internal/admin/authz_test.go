@@ -61,7 +61,7 @@ var publicRoutes = map[string]struct{}{
 func TestRoutePolicyRoleMatrix(t *testing.T) {
 	service := &HTTPService{}
 	routes := service.routes()
-	if len(routes) != 15 {
+	if len(routes) != 16 {
 		t.Fatalf("route table changed without a policy review: %d routes", len(routes))
 	}
 	for pattern, policy := range routes {
@@ -187,6 +187,9 @@ func TestProtectedEndpointRoleEnforcement(t *testing.T) {
 		wantStatus int
 	}{
 		{"observer denied submit", http.MethodPost, "/v1/onboarding/requests", []string{RoleCBNObserver}, http.StatusForbidden},
+		{"observer denied onboarding queue", http.MethodGet, "/v1/onboarding/requests", []string{RoleCBNObserver}, http.StatusForbidden},
+		{"nwa officer denied onboarding queue", http.MethodGet, "/v1/onboarding/requests", []string{RoleNWAOfficer}, http.StatusForbidden},
+		{"roleless identity denied onboarding queue", http.MethodGet, "/v1/onboarding/requests", nil, http.StatusForbidden},
 		{"auditor denied onboarding decision", http.MethodPost, "/v1/onboarding/requests/abc/decision", []string{RoleIndependentAuditor}, http.StatusForbidden},
 		{"icrc observer denied privacy decision", http.MethodPost, "/v1/privacy/activities/abc/decision", []string{RoleICRCObserver}, http.StatusForbidden},
 		{"nwa officer denied onboarding decision", http.MethodPost, "/v1/onboarding/requests/abc/decision", []string{RoleNWAOfficer}, http.StatusForbidden},

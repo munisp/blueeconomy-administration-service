@@ -19,6 +19,7 @@ Authorization is fail-closed and default-deny: any route not in the policy table
 | Method and path | Allowed roles | Function |
 |---|---|---|
 | `POST /v1/onboarding/requests` | `platform-admin`, `nimasa-officer`, `nwa-officer`, `niwa-officer` | Record a request for an approved organization and allowed roles. |
+| `GET /v1/onboarding/requests` | `platform-admin`, `nimasa-officer` | Read the tenant-scoped approver queue (see [Onboarding approver queue](#onboarding-approver-queue)). |
 | `POST /v1/onboarding/requests/{id}/decision` | `platform-admin`, `nimasa-officer` | Approve or reject a request; self-approval is rejected. |
 | `POST /v1/onboarding/requests/{id}/provision` | `platform-admin`, `nimasa-officer` | Claim one approved request and call the documented Keycloak organization invitation endpoint. |
 | `POST /v1/onboarding/requests/{id}/activate` | `platform-admin`, `nimasa-officer` | After invitation/registration, atomically activate the request and assign only the approved Keycloak organization groups for its role set. |
@@ -33,6 +34,46 @@ Authorization is fail-closed and default-deny: any route not in the policy table
 | `POST /v1/enrollment/batches` | `platform-admin`, `nimasa-officer`, `nwa-officer`, `niwa-officer` | Propose an agent-assisted enrollment batch (1–500 rows); each row is validated independently and carries an explicit per-row status. |
 | `POST /v1/enrollment/batches/{id}/confirm` | `platform-admin`, `nimasa-officer` | Second officer confirms the batch (proposer ≠ confirmer, database-enforced); accepted rows are enrolled with per-row failure isolation. |
 | `GET /healthz` | Network-restricted operational probe | Report process health only. |
+
+## Onboarding approver queue
+
+`GET /v1/onboarding/requests` is the approver-facing read model over the onboarding pipeline. It is denied by default: the caller must hold an approver role (`platform-admin` or `nimasa-officer`), must carry a non-empty tenant claim (`tenant_id` in `jwt` mode, `X-Blueeconomy-Tenant-ID` in `trusted_proxy` mode), and the embedded-OPA PBAC policy (`list` action on the `onboarding_request` collection) must allow the call. The result set is scoped to the caller's tenant claim — requests owned by any other tenant are never visible — and the store query enforces the same scope, so a bypassed middleware cannot widen the read.
+
+Query parameters:
+
+| Parameter | Contract |
+|---|---|
+| `status` | Optional logical queue filter. `pending` = awaiting an approver decision (`submitted`, `pending_verification`, `identity_review`, `identity_verified`); `decided` = `approved` (decision taken, awaiting provisioning); `provisioned` = `invited` (Keycloak invitation completed, awaiting activation); `active` = `active`; `rejected` = `rejected`, `identity_rejected`. Any other value is rejected with 400. Internal transition states (`provisioning`, `activating`, `provisioning_failed`, `activation_failed`, `provisioning_ambiguous`, `activation_ambiguous`) appear in the unfiltered queue only. |
+| `limit` | Page size, integer 1–100, default 25. Out-of-range or non-numeric values are 400. |
+| `offset` | Zero-based row offset, default 0. Negative or non-numeric values are 400. |
+
+Rows are ordered deterministically by `(created_at ASC, id ASC)` — oldest submissions first — so the queue is a stable FIFO under pagination. Response shape:
+
+```json
+{
+  "requests": [
+    {
+      "id": "uuid",
+      "organization_id": "tenant",
+      "email": "stakeholder@example.gov.ng",
+      "first_name": "Amina",
+      "last_name": "Bello",
+      "requested_roles": ["nimasa-officer"],
+      "requester_subject": "officer-subject",
+      "status": "submitted",
+      "persona": "",
+      "contact_channel": "",
+      "contact_reference": "",
+      "notification_status": "",
+      "created_at": "2026-08-28T09:30:00Z",
+      "updated_at": "2026-08-28T09:30:00Z"
+    }
+  ],
+  "page": { "limit": 25, "offset": 0, "next_offset": 25, "total": 42 }
+}
+```
+
+`page.next_offset` is `null` when the current page reaches the end of the filtered set; `page.total` is the filtered row count for the caller's tenant, independent of the page window. `requests` is always an array, empty when nothing matches. Error responses use the service-wide `{"error": "..."}` envelope: 401 (unauthenticated), 403 (missing role, missing tenant claim, or policy denial), 400 (invalid query parameters).
 
 ## Enrollment journeys
 

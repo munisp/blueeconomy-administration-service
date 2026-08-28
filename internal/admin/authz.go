@@ -50,6 +50,9 @@ type routePolicy struct {
 	// pbacAction, when non-empty, additionally gates the route through the
 	// embedded-OPA PBAC middleware with this policy action.
 	pbacAction string
+	// pbacCollection marks a pbac-gated collection route (no {id} path
+	// value): the policy resource is the caller-tenant collection itself.
+	pbacCollection bool
 }
 
 var (
@@ -66,6 +69,7 @@ var (
 func (service *HTTPService) routes() map[string]routePolicy {
 	return map[string]routePolicy{
 		"GET /healthz":                                       {handler: service.health, public: true},
+		"GET /v1/onboarding/requests":                        {handler: service.list, allowedRoles: onboardingApproverRoles, pbacAction: "list", pbacCollection: true},
 		"POST /v1/onboarding/requests":                       {handler: service.submit, allowedRoles: onboardingOperatorRoles},
 		"POST /v1/onboarding/requests/{id}/decision":         {handler: service.decide, allowedRoles: onboardingApproverRoles, pbacAction: "decide"},
 		"POST /v1/onboarding/requests/{id}/provision":        {handler: service.provision, allowedRoles: onboardingApproverRoles, pbacAction: "provision"},

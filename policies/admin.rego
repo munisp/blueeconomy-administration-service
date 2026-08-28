@@ -38,10 +38,11 @@ classification_levels := {
 }
 
 # Tenant-scoped onboarding administration: an approver may decide, provision
-# or activate an onboarding request only within their own tenant/agency.
+# or activate an onboarding request, or list the approver queue collection,
+# only within their own tenant/agency.
 allow if {
 	input.resource.kind == "onboarding_request"
-	input.action in {"decide", "provision", "activate"}
+	input.action in {"decide", "provision", "activate", "list"}
 	some role in input.roles
 	role in approver_roles
 	not holds_read_only_role

@@ -62,7 +62,11 @@ func (service *HTTPService) Handler() http.Handler {
 		}
 		handler := policy.handler
 		if policy.pbacAction != "" {
-			handler = service.requirePBAC(policy.pbacAction, handler)
+			if policy.pbacCollection {
+				handler = service.requirePBACCollection(policy.pbacAction, "onboarding_request", handler)
+			} else {
+				handler = service.requirePBAC(policy.pbacAction, handler)
+			}
 		}
 		mux.HandleFunc(pattern, service.requireRoles(policy.allowedRoles, handler))
 	}
