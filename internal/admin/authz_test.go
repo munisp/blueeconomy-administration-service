@@ -42,22 +42,34 @@ func isMutating(method string) bool {
 	return method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions
 }
 
+// publicRoutes is the explicit allowlist of routes that may run without role
+// authorization: the operational probe and the rate-limited public
+// self-service enrollment endpoint. Adding a route here requires a policy
+// review.
+var publicRoutes = map[string]struct{}{
+	"GET /healthz":                 {},
+	"POST /v1/enrollment/requests": {},
+}
+
 // TestRoutePolicyRoleMatrix walks every registered route against every realm
 // role and asserts the exact allowed/denied outcome. Any route added to the
 // table without a policy review fails this test.
 func TestRoutePolicyRoleMatrix(t *testing.T) {
 	service := &HTTPService{}
 	routes := service.routes()
-	if len(routes) != 10 {
+	if len(routes) != 15 {
 		t.Fatalf("route table changed without a policy review: %d routes", len(routes))
 	}
 	for pattern, policy := range routes {
 		method, _, _ := strings.Cut(pattern, " ")
 		if len(policy.allowedRoles) == 0 {
-			if pattern != "GET /healthz" {
-				t.Fatalf("route %s has no role policy and is not the health probe", pattern)
+			if _, approved := publicRoutes[pattern]; !approved || !policy.public {
+				t.Fatalf("route %s has no role policy and is not an approved public route", pattern)
 			}
 			continue
+		}
+		if policy.public {
+			t.Fatalf("route %s is marked public but carries a role policy", pattern)
 		}
 		for _, role := range allRealmRoles {
 			err := authorizeRequest(method, roleSet(role), policy.allowedRoles)

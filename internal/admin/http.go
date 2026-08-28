@@ -5,28 +5,39 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 )
 
 type HTTPService struct {
-	store          *Store
-	keycloak       *KeycloakClient
-	organizationID string
-	allowedRoles   map[string]struct{}
-	serviceActor   string
-	authenticator  subjectAuthenticator
+	store               *Store
+	keycloak            *KeycloakClient
+	organizationID      string
+	allowedRoles        map[string]struct{}
+	serviceActor        string
+	authenticator       subjectAuthenticator
+	rateLimiter         enrollmentRateLimiter
+	enrollmentRateLimit int
+}
+
+// enrollmentRateLimiter is the strict fixed-window limiter guarding the
+// public self-service endpoint. *Store implements it against PostgreSQL.
+type enrollmentRateLimiter interface {
+	AllowEnrollmentRequest(ctx context.Context, bucketKey string, windowStart time.Time, limit int) (bool, error)
 }
 
 func NewHTTPService(store *Store, keycloak *KeycloakClient, config Config) *HTTPService {
 	return &HTTPService{
-		store:          store,
-		keycloak:       keycloak,
-		organizationID: config.KeycloakOrganizationID,
-		allowedRoles:   config.AllowedRoles,
-		serviceActor:   config.ServiceActorSubject,
-		authenticator:  newSubjectAuthenticator(config),
+		store:               store,
+		keycloak:            keycloak,
+		organizationID:      config.KeycloakOrganizationID,
+		allowedRoles:        config.AllowedRoles,
+		serviceActor:        config.ServiceActorSubject,
+		authenticator:       newSubjectAuthenticator(config),
+		rateLimiter:         store,
+		enrollmentRateLimit: config.EnrollmentRateLimitPerMinute,
 	}
 }
 
@@ -324,4 +335,133 @@ func securityHeaders(next http.Handler) http.Handler {
 		writer.Header().Set("X-Content-Type-Options", "nosniff")
 		next.ServeHTTP(writer, request)
 	})
+}
+
+// submitEnrollment is the public self-service enrollment endpoint. It is
+// fail-closed on its rate limit: when the limiter is not configured or
+// storage is unavailable the request is denied rather than admitted.
+func (service *HTTPService) submitEnrollment(writer http.ResponseWriter, request *http.Request) {
+	if service.rateLimiter == nil || service.enrollmentRateLimit <= 0 {
+		writeError(writer, http.StatusServiceUnavailable, errors.New("self-service enrollment is not enabled"))
+		return
+	}
+	allowed, err := service.rateLimiter.AllowEnrollmentRequest(request.Context(), service.enrollmentRateLimitKey(request), time.Now().UTC().Truncate(time.Minute), service.enrollmentRateLimit)
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, errors.New("enrollment rate limiting is unavailable"))
+		return
+	}
+	if !allowed {
+		writeError(writer, http.StatusTooManyRequests, errors.New("enrollment request rate limit exceeded"))
+		return
+	}
+	var input EnrollmentSubmitInput
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	input = input.Normalize()
+	if err := input.Validate(); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	created, err := service.store.CreateEnrollment(request.Context(), service.organizationID, input, SelfServiceRequesterSubject)
+	if err != nil {
+		writeError(writer, http.StatusConflict, errors.New("enrollment request could not be recorded"))
+		return
+	}
+	writeJSON(writer, http.StatusCreated, created)
+}
+
+// enrollmentRateLimitKey scopes the fixed window to the authenticated subject
+// when the API edge asserted one, and otherwise to the client IP.
+func (service *HTTPService) enrollmentRateLimitKey(request *http.Request) string {
+	if identity, err := service.identity(request); err == nil && identity.Subject != "" {
+		return "subject:" + identity.Subject
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(request.RemoteAddr))
+	if err != nil || host == "" {
+		return "ip:unknown"
+	}
+	return "ip:" + host
+}
+
+func (service *HTTPService) startIdentityReview(writer http.ResponseWriter, request *http.Request) {
+	officer, err := service.authenticatedSubject(request)
+	if err != nil {
+		writeError(writer, http.StatusUnauthorized, err)
+		return
+	}
+	updated, err := service.store.StartIdentityReview(request.Context(), request.PathValue("id"), officer)
+	if err != nil {
+		writeError(writer, http.StatusConflict, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, updated)
+}
+
+func (service *HTTPService) recordIdentityVerification(writer http.ResponseWriter, request *http.Request) {
+	officer, err := service.authenticatedSubject(request)
+	if err != nil {
+		writeError(writer, http.StatusUnauthorized, err)
+		return
+	}
+	var input IdentityVerificationInput
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	input = input.Normalize()
+	if err := input.Validate(); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	updated, err := service.store.RecordIdentityVerification(request.Context(), request.PathValue("id"), officer, input)
+	if err != nil {
+		writeError(writer, http.StatusConflict, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, updated)
+}
+
+func (service *HTTPService) createEnrollmentBatch(writer http.ResponseWriter, request *http.Request) {
+	proposer, err := service.authenticatedSubject(request)
+	if err != nil {
+		writeError(writer, http.StatusUnauthorized, err)
+		return
+	}
+	var input EnrollmentBatchInput
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	input = input.Normalize()
+	if err := input.Validate(); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	results := ValidateEnrollmentRows(input.Rows)
+	batch, records, err := service.store.CreateBatch(request.Context(), proposer, input.Rows, results)
+	if err != nil {
+		writeError(writer, http.StatusConflict, errors.New("enrollment batch could not be recorded"))
+		return
+	}
+	writeJSON(writer, http.StatusCreated, map[string]any{"batch": batch, "rows": records})
+}
+
+func (service *HTTPService) confirmEnrollmentBatch(writer http.ResponseWriter, request *http.Request) {
+	confirmer, err := service.authenticatedSubject(request)
+	if err != nil {
+		writeError(writer, http.StatusUnauthorized, err)
+		return
+	}
+	batch, records, err := service.store.ConfirmBatch(request.Context(), request.PathValue("id"), service.organizationID, confirmer)
+	if err != nil {
+		if errors.Is(err, ErrMakerCheckerViolation) {
+			writeError(writer, http.StatusForbidden, err)
+			return
+		}
+		writeError(writer, http.StatusConflict, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"batch": batch, "rows": records})
 }

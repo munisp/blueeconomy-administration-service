@@ -27,7 +27,38 @@ Authorization is fail-closed and default-deny: any route not in the policy table
 | `POST /v1/privacy/activities/{id}/attest` | `platform-admin`, `nimasa-officer`, `nwa-officer`, `niwa-officer` | Recorded owner attests the draft activity. |
 | `POST /v1/privacy/activities/{id}/submit-dpo-review` | `platform-admin`, `nimasa-officer`, `nwa-officer`, `niwa-officer` | Recorded owner submits the attested activity for DPO review. |
 | `POST /v1/privacy/activities/{id}/decision` | `platform-admin`, `nimasa-officer` | Independent DPO decision; requester/owner self-decision is rejected. |
+| `POST /v1/enrollment/requests` | Public (no role), strictly rate-limited per subject/IP | Record a self-service enrollment request in `pending_verification`; it can never reach provisioning without an officer decision. |
+| `POST /v1/enrollment/requests/{id}/identity-review/start` | `platform-admin`, `nimasa-officer`, `nwa-officer`, `niwa-officer` | Officer opens the KYC identity-proofing stage (`pending_verification` → `identity_review`). |
+| `POST /v1/enrollment/requests/{id}/identity-review/outcome` | `platform-admin`, `nimasa-officer`, `nwa-officer`, `niwa-officer` | Officer records the identity-proofing outcome (`identity_verified`/`identity_rejected`) with document type and a sha256 digest of the document reference — never the raw number. |
+| `POST /v1/enrollment/batches` | `platform-admin`, `nimasa-officer`, `nwa-officer`, `niwa-officer` | Propose an agent-assisted enrollment batch (1–500 rows); each row is validated independently and carries an explicit per-row status. |
+| `POST /v1/enrollment/batches/{id}/confirm` | `platform-admin`, `nimasa-officer` | Second officer confirms the batch (proposer ≠ confirmer, database-enforced); accepted rows are enrolled with per-row failure isolation. |
 | `GET /healthz` | Network-restricted operational probe | Report process health only. |
+
+## Enrollment journeys
+
+Self-service and agent-assisted enrollment extend the onboarding pipeline with three additional pre-decision states. The full state machine is:
+
+```
+self-service submit --> pending_verification --> identity_review --> identity_verified --+
+officer submit      --> submitted -------------------------------------------------------+--> decision (approve|reject)
+                                                                                          |
+                        rejected <------------------------ (reject) ----------------------+
+                        approved  <----------------------- (approve) ---------------------+
+                            |
+                            +--> provisioning --> invited --> activating --> active
+                            |        |                          |
+                            |        +--> provisioning_failed/  +--> activation_failed/
+                            |            provisioning_ambiguous     activation_ambiguous
+                            |
+        identity_review --> identity_rejected (terminal; no decision or provisioning possible)
+```
+
+- **Self-service stakeholder** (personas `trucker`, `ferry-passenger`, `operator`, `fisher`, `seafarer-trainee`, `beneficiary`, `exporter`, `processor`, `fleet-operator`): submits `POST /v1/enrollment/requests` with a contact channel (`sms`, `ussd`, `email`, `app`) and reference. The endpoint is public but strictly rate-limited per subject/IP through a database-backed fixed window (`ADMIN_ENROLLMENT_RATE_LIMIT_PER_MINUTE`); a missing limit or limiter outage fails closed. The request is recorded against the non-human actor `enrollment:self-service` in `pending_verification` and is structurally unable to reach a decision — and therefore provisioning — until an officer completes identity proofing.
+- **KYC identity proofing** (`nimasa-officer`, `nwa-officer`, `niwa-officer`, `platform-admin`): the officer opens review, then records the outcome with the document type and a canonical `sha256:` digest of the document reference. Raw document numbers are rejected by validation and never stored. Every transition appends an audit row (who/when/what) to the decision evidence stream, and each request admits exactly one KYC outcome.
+- **Officer decision and provisioning** (`platform-admin`, `nimasa-officer`): unchanged maker/checker decision, now gated on `identity_verified` for self-service requests; provisioning and activation behave exactly as for officer-submitted requests.
+- **Activation notification**: a completed activation atomically writes one platform-envelope outbox event — topic `platform.onboarding.v1`, type `onboarding.activated.v1`, classification `CONFIDENTIAL`, provenance naming the acting principal — whose payload carries only the request ID, persona and contact-channel reference the notifier needs to deliver credential instructions. The request's `notification_status` moves `pending` → `sent`/`failed`. A platform notifier (USSD/SMS gateway, out of scope for this service) claims events through `ClaimOutboxEvents`, a retry-safe leased claim (`pending`/`failed` and expired claims are re-claimable, `SKIP LOCKED` prevents double delivery), and settles them through `RecordNotificationResult`; failed events stay claimable for retry.
+- **Agent-assisted bulk enrollment** (officer roles): `POST /v1/enrollment/batches` accepts 1–500 CSV-style JSON rows, validates each row independently and stores an explicit `accepted`/`rejected` status per row. A second, distinct officer must call `POST /v1/enrollment/batches/{id}/confirm` — proposer ≠ confirmer is enforced both in the service and by a database constraint, mirroring the financial-controls dual control. On confirmation each accepted row is enrolled under its own transaction savepoint: a per-row failure is recorded as `failed` with its error and never aborts or silently skips the rest of the batch. Batch-enrolled requests enter the same `pending_verification` pipeline as self-service requests.
+
 
 ## Required configuration
 
@@ -45,6 +76,7 @@ All configuration must be supplied by the approved deployment/secret mechanism. 
 | `ONBOARDING_ALLOWED_ROLES` | Comma-separated approved service-role catalogue. |
 | `ADMIN_OIDC_ROLES_CLIENT_IDS` | Optional comma-separated Keycloak client IDs whose `resource_access` roles are trusted in `jwt` mode, in addition to `realm_access.roles`. |
 | `KEYCLOAK_ROLE_GROUP_MAPPING_JSON` | Non-secret JSON map from each approved role to its actual approved Keycloak organization group ID. |
+| `ADMIN_ENROLLMENT_RATE_LIMIT_PER_MINUTE` | Positive fixed-window per-subject/IP rate limit for the public self-service enrollment endpoint; missing or invalid disables enrollment (fail-closed). |
 
 The Keycloak client uses client credentials and invokes the documented organization `invite-user` administrative operation after an atomic PostgreSQL claim. After an authorised invitation/registration result is available, the activation endpoint maps the request’s approved roles to the configured Keycloak organization groups using the documented organization group-membership operation. It sends no account password, raw OIDC user token, refresh token or secret to the database or its HTTP response.
 

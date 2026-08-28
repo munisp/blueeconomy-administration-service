@@ -112,6 +112,8 @@ sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml
   psql -v ON_ERROR_STOP=1 -U platform -d adminservice < "$root/db/migrations/0003_external_operations.sql"
 sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml" exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U platform -d adminservice < "$root/db/migrations/0004_privacy_governance.sql"
+sudo docker compose --env-file "$integration/.env" -f "$integration/compose.yaml" exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U platform -d adminservice < "$root/db/migrations/0005_enrollment_journeys.sql"
 
 (cd "$root" && go build -cover -coverpkg=./... -o "$integration/results/admin-service-bin" ./cmd/admin-service)
 ADMIN_SERVICE_LISTEN_ADDRESS='127.0.0.1:18080' \
@@ -129,6 +131,7 @@ KEYCLOAK_CA_FILE="$integration/tls/tls.crt" \
 KEYCLOAK_SERVICE_ACTOR_SUBJECT='service:central-administration-local-integration' \
 GOCOVERDIR="$integration/results/go-coverage" \
 ONBOARDING_ALLOWED_ROLES='safety.telemetry.review' \
+ADMIN_ENROLLMENT_RATE_LIMIT_PER_MINUTE='30' \
 KEYCLOAK_ROLE_GROUP_MAPPING_JSON="$(jq -nc --arg group "$group_id" '{"safety.telemetry.review":$group}')" \
 "$integration/results/admin-service-bin" > "$integration/results/admin-service.log" 2>&1 &
 service_pid="$!"

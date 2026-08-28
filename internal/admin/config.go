@@ -7,30 +7,32 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 )
 
 type Config struct {
-	ListenAddress             string
-	PostgresDSN               string
-	KeycloakTokenURL          *url.URL
-	KeycloakAdminBaseURL      *url.URL
-	KeycloakRealm             string
-	KeycloakOrganizationID    string
-	KeycloakAdminClientID     string
-	KeycloakAdminClientSecret string
-	KeycloakCAFile            string
-	ServiceActorSubject       string
-	AllowedRoles              map[string]struct{}
-	RoleGroupIDs              map[string]string
-	AuthMode                  string
-	OIDCIssuer                string
-	OIDCAudience              string
-	OIDCJWKSURL               *url.URL
-	OIDCCAFile                string
-	OIDCRolesClientIDs        []string
-	TrustedProxyIdentity      string
-	TrustedProxyCIDRs         []*net.IPNet
+	ListenAddress                string
+	PostgresDSN                  string
+	KeycloakTokenURL             *url.URL
+	KeycloakAdminBaseURL         *url.URL
+	KeycloakRealm                string
+	KeycloakOrganizationID       string
+	KeycloakAdminClientID        string
+	KeycloakAdminClientSecret    string
+	KeycloakCAFile               string
+	ServiceActorSubject          string
+	AllowedRoles                 map[string]struct{}
+	RoleGroupIDs                 map[string]string
+	AuthMode                     string
+	OIDCIssuer                   string
+	OIDCAudience                 string
+	OIDCJWKSURL                  *url.URL
+	OIDCCAFile                   string
+	OIDCRolesClientIDs           []string
+	TrustedProxyIdentity         string
+	TrustedProxyCIDRs            []*net.IPNet
+	EnrollmentRateLimitPerMinute int
 }
 
 func LoadConfig() (Config, error) {
@@ -131,6 +133,13 @@ func LoadConfig() (Config, error) {
 		}
 		config.RoleGroupIDs[role] = groupID
 	}
+	// The public self-service endpoint is fail-closed on its rate limit: a
+	// missing or invalid limit disables enrollment rather than opening it.
+	rateLimit, err := strconv.Atoi(strings.TrimSpace(os.Getenv("ADMIN_ENROLLMENT_RATE_LIMIT_PER_MINUTE")))
+	if err != nil || rateLimit <= 0 || rateLimit > 100000 {
+		return Config{}, errors.New("ADMIN_ENROLLMENT_RATE_LIMIT_PER_MINUTE must be a positive integer of at most 100000")
+	}
+	config.EnrollmentRateLimitPerMinute = rateLimit
 	return config, nil
 }
 

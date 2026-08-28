@@ -52,13 +52,13 @@ func (store *Store) Create(ctx context.Context, input SubmitInput, requesterSubj
 	const query = `
 	INSERT INTO onboarding_requests (organization_id, email, first_name, last_name, requested_roles, requester_subject)
 	VALUES ($1, $2, $3, $4, $5, $6)
-	RETURNING id::text, organization_id, email, first_name, last_name, requested_roles, requester_subject, status, created_at, updated_at`
+	RETURNING id::text, organization_id, email, first_name, last_name, requested_roles, requester_subject, status, persona, contact_channel, contact_reference, notification_status, created_at, updated_at`
 	return scanRequest(store.pool.QueryRow(ctx, query, input.OrganizationID, input.Email, input.FirstName, input.LastName, input.RequestedRoles, requesterSubject))
 }
 
 func (store *Store) GetForUpdate(ctx context.Context, transaction pgx.Tx, id string) (OnboardingRequest, error) {
 	const query = `
-	SELECT id::text, organization_id, email, first_name, last_name, requested_roles, requester_subject, status, created_at, updated_at
+	SELECT id::text, organization_id, email, first_name, last_name, requested_roles, requester_subject, status, persona, contact_channel, contact_reference, notification_status, created_at, updated_at
 	FROM onboarding_requests WHERE id = $1 FOR UPDATE`
 	return scanRequest(transaction.QueryRow(ctx, query, id))
 }
@@ -105,14 +105,15 @@ func (store *Store) ClaimProvisioning(ctx context.Context, id string) (Onboardin
 		UPDATE onboarding_requests
 		SET status = 'provisioning'
 		WHERE id = $1 AND status = 'approved'
-		RETURNING id, organization_id, email, first_name, last_name, requested_roles, requester_subject, status, created_at, updated_at
+		RETURNING id, organization_id, email, first_name, last_name, requested_roles, requester_subject, status, persona, contact_channel, contact_reference, notification_status, created_at, updated_at
 	), operation AS (
 		INSERT INTO onboarding_external_operations (request_id, operation_kind, status, lease_until)
 		SELECT id, 'provision', 'running', now() + interval '60 seconds' FROM claimed
 		RETURNING request_id
 	)
 	SELECT claimed.id::text, claimed.organization_id, claimed.email, claimed.first_name, claimed.last_name,
-	       claimed.requested_roles, claimed.requester_subject, claimed.status, claimed.created_at, claimed.updated_at
+	       claimed.requested_roles, claimed.requester_subject, claimed.status, claimed.persona,
+	       claimed.contact_channel, claimed.contact_reference, claimed.notification_status, claimed.created_at, claimed.updated_at
 	FROM claimed JOIN operation ON operation.request_id = claimed.id`
 	request, err := scanRequest(store.pool.QueryRow(ctx, query, id))
 	if err != nil {
@@ -133,14 +134,15 @@ func (store *Store) ClaimActivation(ctx context.Context, id, keycloakUserID stri
 		UPDATE onboarding_requests
 		SET status = 'activating'
 		WHERE id = $1 AND status = 'invited'
-		RETURNING id, organization_id, email, first_name, last_name, requested_roles, requester_subject, status, created_at, updated_at
+		RETURNING id, organization_id, email, first_name, last_name, requested_roles, requester_subject, status, persona, contact_channel, contact_reference, notification_status, created_at, updated_at
 	), operation AS (
 		INSERT INTO onboarding_external_operations (request_id, operation_kind, status, keycloak_user_id, lease_until)
 		SELECT id, 'activate', 'running', $2, now() + interval '60 seconds' FROM claimed
 		RETURNING request_id
 	)
 	SELECT claimed.id::text, claimed.organization_id, claimed.email, claimed.first_name, claimed.last_name,
-	       claimed.requested_roles, claimed.requester_subject, claimed.status, claimed.created_at, claimed.updated_at
+	       claimed.requested_roles, claimed.requester_subject, claimed.status, claimed.persona,
+	       claimed.contact_channel, claimed.contact_reference, claimed.notification_status, claimed.created_at, claimed.updated_at
 	FROM claimed JOIN operation ON operation.request_id = claimed.id`
 	request, err := scanRequest(store.pool.QueryRow(ctx, query, id, keycloakUserID))
 	if err != nil {
@@ -188,6 +190,11 @@ func (store *Store) recordExternalResult(ctx context.Context, id, actorSubject, 
 	}
 	if _, err := transaction.Exec(ctx, `INSERT INTO onboarding_decisions (request_id, decision, actor_subject, reason) VALUES ($1, $2, $3, $4)`, id, decision, actorSubject, reason); err != nil {
 		return fmt.Errorf("write external-result decision: %w", err)
+	}
+	if operationKind == "activate" && nextStatus == StatusActive {
+		if err := insertActivationNotice(ctx, transaction, id, actorSubject); err != nil {
+			return fmt.Errorf("record activation notice: %w", err)
+		}
 	}
 	if err := transaction.Commit(ctx); err != nil {
 		return fmt.Errorf("commit external-result transition: %w", err)
@@ -247,6 +254,10 @@ func scanRequest(row pgx.Row) (OnboardingRequest, error) {
 		&request.RequestedRoles,
 		&request.RequesterSubject,
 		&request.Status,
+		&request.Persona,
+		&request.ContactChannel,
+		&request.ContactReference,
+		&request.NotificationStatus,
 		&request.CreatedAt,
 		&request.UpdatedAt,
 	); err != nil {

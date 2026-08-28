@@ -39,11 +39,14 @@ var (
 )
 
 // routePolicy binds one registered route to its minimal allowed role set. A
-// nil allowedRoles slice marks an unauthenticated operational probe; every
-// other route requires authentication plus role authorization.
+// nil allowedRoles slice is permitted only for routes explicitly marked
+// public: the unauthenticated operational probe and the rate-limited public
+// self-service enrollment endpoint. Every other route requires authentication
+// plus role authorization.
 type routePolicy struct {
 	handler      http.HandlerFunc
 	allowedRoles []string
+	public       bool
 }
 
 var (
@@ -59,7 +62,7 @@ var (
 // authorization policy. Any route not present here is denied by default.
 func (service *HTTPService) routes() map[string]routePolicy {
 	return map[string]routePolicy{
-		"GET /healthz":                                       {handler: service.health},
+		"GET /healthz":                                       {handler: service.health, public: true},
 		"POST /v1/onboarding/requests":                       {handler: service.submit, allowedRoles: onboardingOperatorRoles},
 		"POST /v1/onboarding/requests/{id}/decision":         {handler: service.decide, allowedRoles: onboardingApproverRoles},
 		"POST /v1/onboarding/requests/{id}/provision":        {handler: service.provision, allowedRoles: onboardingApproverRoles},
@@ -69,6 +72,14 @@ func (service *HTTPService) routes() map[string]routePolicy {
 		"POST /v1/privacy/activities/{id}/attest":            {handler: service.attestPrivacyActivity, allowedRoles: onboardingOperatorRoles},
 		"POST /v1/privacy/activities/{id}/submit-dpo-review": {handler: service.submitPrivacyDPOReview, allowedRoles: onboardingOperatorRoles},
 		"POST /v1/privacy/activities/{id}/decision":          {handler: service.decidePrivacyActivity, allowedRoles: onboardingApproverRoles},
+		// Public self-service enrollment: no role is required, but the route
+		// is explicitly marked public and is strictly rate-limited per
+		// subject/IP before any input is accepted.
+		"POST /v1/enrollment/requests":                              {handler: service.submitEnrollment, public: true},
+		"POST /v1/enrollment/requests/{id}/identity-review/start":   {handler: service.startIdentityReview, allowedRoles: onboardingOperatorRoles},
+		"POST /v1/enrollment/requests/{id}/identity-review/outcome": {handler: service.recordIdentityVerification, allowedRoles: onboardingOperatorRoles},
+		"POST /v1/enrollment/batches":                               {handler: service.createEnrollmentBatch, allowedRoles: onboardingOperatorRoles},
+		"POST /v1/enrollment/batches/{id}/confirm":                  {handler: service.confirmEnrollmentBatch, allowedRoles: onboardingApproverRoles},
 	}
 }
 
