@@ -149,24 +149,32 @@ func insertActivationNotice(ctx context.Context, transaction pgx.Tx, requestID, 
 }
 
 // ClaimOutboxEvents is the retry-safe claim path for the notifier: pending
-// and failed events, plus claimed events whose lease expired, are atomically
-// re-leased. SKIP LOCKED keeps concurrent claimers from double-delivering.
-func (store *Store) ClaimOutboxEvents(ctx context.Context, limit int) ([]OutboxEvent, error) {
+// events, failed events with attempts left, and claimed events whose lease
+// expired (crashed workers) are atomically re-leased. SKIP LOCKED keeps
+// concurrent claimers from double-delivering. Events that already exhausted
+// maxAttempts stay failed as the terminal, operator-visible state and are
+// never reclaimed.
+func (store *Store) ClaimOutboxEvents(ctx context.Context, limit, maxAttempts int) ([]OutboxEvent, error) {
 	if limit <= 0 || limit > 500 {
 		return nil, errors.New("claim limit must be between 1 and 500")
+	}
+	if maxAttempts <= 0 {
+		return nil, errors.New("max attempts must be positive")
 	}
 	const query = `
 	UPDATE onboarding_outbox_events
 	SET status = 'claimed', attempt = attempt + 1, lease_until = now() + interval '60 seconds'
 	WHERE id IN (
 		SELECT id FROM onboarding_outbox_events
-		WHERE status IN ('pending', 'failed') OR (status = 'claimed' AND lease_until < now())
+		WHERE status = 'pending'
+			OR (status = 'failed' AND attempt < $2)
+			OR (status = 'claimed' AND lease_until < now() AND attempt < $2)
 		ORDER BY created_at
 		LIMIT $1
 		FOR UPDATE SKIP LOCKED
 	)
 	RETURNING id::text, request_id::text, topic, event_type, classification, provenance_principal, payload, status, attempt, created_at`
-	rows, err := store.pool.Query(ctx, query, limit)
+	rows, err := store.pool.Query(ctx, query, limit, maxAttempts)
 	if err != nil {
 		return nil, fmt.Errorf("claim outbox events: %w", err)
 	}
