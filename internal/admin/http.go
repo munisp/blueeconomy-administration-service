@@ -2,9 +2,11 @@ package admin
 
 import (
 	"github.com/munisp/blueeconomy-administration-service/internal/pbac"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -12,9 +14,40 @@ import (
 	"time"
 )
 
+// onboardingStore is the persistence surface of the HTTP layer. *Store
+// implements it against PostgreSQL; tests substitute in-memory fakes.
+type onboardingStore interface {
+	Create(ctx context.Context, input SubmitInput, requesterSubject string) (OnboardingRequest, error)
+	Decide(ctx context.Context, id, approverSubject, decision, reason string) (OnboardingRequest, error)
+	Get(ctx context.Context, id string) (OnboardingRequest, error)
+	ClaimProvisioning(ctx context.Context, id string) (OnboardingRequest, error)
+	RecordProvisioningResult(ctx context.Context, id, actorSubject string, success bool, reason string) error
+	ClaimActivation(ctx context.Context, id, keycloakUserID string) (OnboardingRequest, error)
+	RecordActivationResult(ctx context.Context, id, actorSubject string, success bool, reason string) error
+	ListRequests(ctx context.Context, organizationID string, statuses []RequestStatus, limit, offset int) ([]OnboardingRequest, int, error)
+	CreateEnrollment(ctx context.Context, organizationID string, input EnrollmentSubmitInput, requesterSubject string) (OnboardingRequest, error)
+	StartIdentityReview(ctx context.Context, id, officerSubject string) (OnboardingRequest, error)
+	RecordIdentityVerification(ctx context.Context, id, officerSubject string, input IdentityVerificationInput) (OnboardingRequest, error)
+	CreateBatch(ctx context.Context, proposerSubject string, rows []EnrollmentSubmitInput, results []error) (EnrollmentBatch, []EnrollmentBatchRow, error)
+	ConfirmBatch(ctx context.Context, id, organizationID, confirmerSubject string) (EnrollmentBatch, []EnrollmentBatchRow, error)
+	CreatePrivacyActivity(ctx context.Context, input CreatePrivacyActivityInput, requesterSubject string) (PrivacyProcessingActivity, error)
+	GetPrivacyActivity(ctx context.Context, id string) (PrivacyProcessingActivity, error)
+	AttestPrivacyActivity(ctx context.Context, id, actorSubject string, input PrivacyWorkflowInput) (PrivacyProcessingActivity, error)
+	SubmitPrivacyDPOReview(ctx context.Context, id, actorSubject string, input PrivacyWorkflowInput) (PrivacyProcessingActivity, error)
+	DecidePrivacyActivity(ctx context.Context, id, actorSubject string, input PrivacyDecisionInput) (PrivacyProcessingActivity, error)
+}
+
+// keycloakAdmin is the Keycloak administration surface of the HTTP layer.
+// *KeycloakClient implements it; tests substitute fakes.
+type keycloakAdmin interface {
+	InviteUser(ctx context.Context, request OnboardingRequest) error
+	FindUserIDByEmail(ctx context.Context, email string) (string, error)
+	AssignApprovedRoleGroups(ctx context.Context, keycloakUserID string, roles []string) error
+}
+
 type HTTPService struct {
-	store               *Store
-	keycloak            *KeycloakClient
+	store               onboardingStore
+	keycloak            keycloakAdmin
 	organizationID      string
 	allowedRoles        map[string]struct{}
 	serviceActor        string
@@ -252,31 +285,67 @@ func (service *HTTPService) decidePrivacyActivity(writer http.ResponseWriter, re
 	writeJSON(writer, http.StatusOK, activity)
 }
 
+// activate binds the approved role groups to the Keycloak identity of the
+// vetted candidate. The Keycloak user is always resolved server-side from
+// the request's immutable, vetted e-mail address: a client-supplied
+// keycloak_user_id is rejected outright so misuse is surfaced instead of
+// silently bound, and the operation fails closed when no unique enabled
+// Keycloak user exists for the vetted identity. The recorded decision names
+// both principals: the officer who activated and the verified identity
+// (e-mail + Keycloak user) that received the roles.
 func (service *HTTPService) activate(writer http.ResponseWriter, request *http.Request) {
-	if _, err := service.authenticatedSubject(request); err != nil {
+	actor, err := service.authenticatedSubject(request)
+	if err != nil {
 		writeError(writer, http.StatusUnauthorized, err)
 		return
 	}
 	var input struct {
 		KeycloakUserID string `json:"keycloak_user_id"`
 	}
-	if err := decodeJSON(request, &input); err != nil || strings.TrimSpace(input.KeycloakUserID) == "" || len(input.KeycloakUserID) > 512 {
-		writeError(writer, http.StatusBadRequest, errors.New("a Keycloak user ID is required for activation"))
+	if err := decodeOptionalJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	candidate, err := service.store.ClaimActivation(request.Context(), request.PathValue("id"), strings.TrimSpace(input.KeycloakUserID))
+	if input.KeycloakUserID != "" {
+		writeError(writer, http.StatusBadRequest, errors.New("keycloak_user_id must not be supplied: the Keycloak identity is resolved from the vetted request e-mail"))
+		return
+	}
+	candidate, err := service.store.Get(request.Context(), request.PathValue("id"))
 	if err != nil {
-		writeError(writer, http.StatusConflict, err)
+		if errors.Is(err, ErrNotFound) {
+			writeError(writer, http.StatusNotFound, errors.New("onboarding request was not found"))
+			return
+		}
+		writeError(writer, http.StatusConflict, errors.New("onboarding request could not be read"))
+		return
+	}
+	if strings.TrimSpace(candidate.Email) == "" {
+		writeError(writer, http.StatusUnprocessableEntity, errors.New("the vetted request carries no e-mail address to resolve a Keycloak identity; activation cannot proceed"))
 		return
 	}
 	contextWithTimeout, cancel := context.WithTimeout(request.Context(), 20*time.Second)
 	defer cancel()
-	if err := service.keycloak.AssignApprovedRoleGroups(contextWithTimeout, strings.TrimSpace(input.KeycloakUserID), candidate.RequestedRoles); err != nil {
-		_ = service.store.RecordActivationResult(request.Context(), candidate.ID, service.serviceActor, false, "Keycloak organization group assignment failed")
+	keycloakUserID, err := service.keycloak.FindUserIDByEmail(contextWithTimeout, candidate.Email)
+	if err != nil {
+		if errors.Is(err, ErrKeycloakUserNotFound) || errors.Is(err, ErrKeycloakUserAmbiguous) {
+			writeError(writer, http.StatusConflict, errors.New("no unique enabled Keycloak user exists for the vetted e-mail address; activation cannot proceed"))
+			return
+		}
+		writeError(writer, http.StatusBadGateway, errors.New("Keycloak identity resolution did not complete"))
+		return
+	}
+	candidate, err = service.store.ClaimActivation(request.Context(), request.PathValue("id"), keycloakUserID)
+	if err != nil {
+		writeError(writer, http.StatusConflict, err)
+		return
+	}
+	if err := service.keycloak.AssignApprovedRoleGroups(contextWithTimeout, keycloakUserID, candidate.RequestedRoles); err != nil {
+		_ = service.store.RecordActivationResult(request.Context(), candidate.ID, actor, false, "Keycloak organization group assignment failed")
 		writeError(writer, http.StatusBadGateway, errors.New("Keycloak role activation did not complete"))
 		return
 	}
-	if err := service.store.RecordActivationResult(request.Context(), candidate.ID, service.serviceActor, true, "Keycloak organization group assignment completed"); err != nil {
+	auditReason := fmt.Sprintf("Keycloak organization group assignment completed for vetted e-mail %s bound to Keycloak user %s", candidate.Email, keycloakUserID)
+	if err := service.store.RecordActivationResult(request.Context(), candidate.ID, actor, true, auditReason); err != nil {
 		writeError(writer, http.StatusInternalServerError, errors.New("role activation completed but evidence update failed; investigate immediately"))
 		return
 	}
@@ -322,6 +391,28 @@ func (service *HTTPService) authenticatedSubject(request *http.Request) (string,
 		return "", err
 	}
 	return identity.Subject, nil
+}
+
+// decodeOptionalJSON behaves like decodeJSON but treats an empty body as the
+// zero value, for endpoints whose entire input is resolved server-side.
+func decodeOptionalJSON(request *http.Request, target any) error {
+	body, err := io.ReadAll(io.LimitReader(request.Body, 1<<20))
+	if err != nil {
+		return errors.New("request body is invalid")
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return errors.New("request body is invalid")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("request body must contain one JSON object")
+	}
+	return nil
 }
 
 func decodeJSON(request *http.Request, target any) error {

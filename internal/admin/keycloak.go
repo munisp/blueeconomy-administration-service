@@ -97,6 +97,81 @@ func (client *KeycloakClient) InviteUser(ctx context.Context, request Onboarding
 	return nil
 }
 
+// ErrKeycloakUserNotFound marks a fail-closed identity resolution: no
+// enabled Keycloak user exists for the vetted e-mail address, so activation
+// must not proceed.
+var ErrKeycloakUserNotFound = errors.New("no enabled Keycloak user matches the vetted e-mail address")
+
+// ErrKeycloakUserAmbiguous marks an identity-integrity violation: more than
+// one enabled Keycloak user matches the vetted e-mail address. Activation
+// fails closed rather than guessing which account receives the roles.
+var ErrKeycloakUserAmbiguous = errors.New("multiple enabled Keycloak users match the vetted e-mail address")
+
+type keycloakUserRecord struct {
+	ID      string `json:"id"`
+	Email   string `json:"email"`
+	Enabled bool   `json:"enabled"`
+}
+
+// FindUserIDByEmail resolves the Keycloak user that belongs to one vetted
+// e-mail address. The caller must pass the e-mail recorded on the approved
+// onboarding request, never client input: this is the server-side binding
+// that keeps role-group activation attached to the identity that passed
+// vetting. The lookup fails closed when no enabled user matches exactly or
+// when the match is ambiguous.
+func (client *KeycloakClient) FindUserIDByEmail(ctx context.Context, email string) (string, error) {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return "", errors.New("a vetted e-mail address is required to resolve the Keycloak user")
+	}
+	token, err := client.clientCredentialsToken(ctx)
+	if err != nil {
+		return "", err
+	}
+	endpoint := client.adminBaseURL.JoinPath("admin", "realms", client.realm, "users")
+	query := endpoint.Query()
+	query.Set("email", email)
+	query.Set("exact", "true")
+	endpoint.RawQuery = query.Encode()
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return "", fmt.Errorf("create Keycloak user lookup request: %w", err)
+	}
+	httpRequest.Header.Set("Authorization", "Bearer "+token)
+	httpRequest.Header.Set("Accept", "application/json")
+	response, err := client.httpClient.Do(httpRequest)
+	if err != nil {
+		return "", fmt.Errorf("send Keycloak user lookup request: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, response.Body)
+		return "", fmt.Errorf("Keycloak user lookup returned HTTP %d", response.StatusCode)
+	}
+	var users []keycloakUserRecord
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&users); err != nil {
+		return "", fmt.Errorf("decode Keycloak user lookup response: %w", err)
+	}
+	matched := ""
+	for _, user := range users {
+		id := strings.TrimSpace(user.ID)
+		if !user.Enabled || id == "" {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(user.Email), email) {
+			continue
+		}
+		if matched != "" && matched != id {
+			return "", ErrKeycloakUserAmbiguous
+		}
+		matched = id
+	}
+	if matched == "" {
+		return "", ErrKeycloakUserNotFound
+	}
+	return matched, nil
+}
+
 func (client *KeycloakClient) AssignApprovedRoleGroups(ctx context.Context, keycloakUserID string, roles []string) error {
 	if strings.TrimSpace(keycloakUserID) == "" {
 		return errors.New("Keycloak user ID is required for group activation")

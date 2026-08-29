@@ -80,6 +80,22 @@ func (store *Store) Create(ctx context.Context, input SubmitInput, requesterSubj
 	return scanRequest(store.pool.QueryRow(ctx, query, input.OrganizationID, input.Email, input.FirstName, input.LastName, input.RequestedRoles, requesterSubject))
 }
 
+// Get loads one onboarding request by id without claiming a state
+// transition. Missing ids return ErrNotFound.
+func (store *Store) Get(ctx context.Context, id string) (OnboardingRequest, error) {
+	const query = `
+	SELECT id::text, organization_id, email, first_name, last_name, requested_roles, requester_subject, status, persona, contact_channel, contact_reference, notification_status, created_at, updated_at
+	FROM onboarding_requests WHERE id = $1`
+	request, err := scanRequest(store.pool.QueryRow(ctx, query, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return OnboardingRequest{}, ErrNotFound
+	}
+	if err != nil {
+		return OnboardingRequest{}, fmt.Errorf("load onboarding request: %w", err)
+	}
+	return request, nil
+}
+
 func (store *Store) GetForUpdate(ctx context.Context, transaction pgx.Tx, id string) (OnboardingRequest, error) {
 	const query = `
 	SELECT id::text, organization_id, email, first_name, last_name, requested_roles, requester_subject, status, persona, contact_channel, contact_reference, notification_status, created_at, updated_at
@@ -149,6 +165,10 @@ func (store *Store) ClaimProvisioning(ctx context.Context, id string) (Onboardin
 	return request, nil
 }
 
+// ClaimActivation atomically moves an invited request into the activating
+// state and records the activation operation. keycloakUserID must be the
+// server-resolved identity of the vetted candidate e-mail (never client
+// input); it is stored on the operation as an immutable identity field.
 func (store *Store) ClaimActivation(ctx context.Context, id, keycloakUserID string) (OnboardingRequest, error) {
 	if keycloakUserID == "" {
 		return OnboardingRequest{}, errors.New("Keycloak user ID is required for activation")
