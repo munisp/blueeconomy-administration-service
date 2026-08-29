@@ -10,6 +10,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/munisp/blueeconomy-administration-service/internal/telemetry"
 )
 
 type Store struct {
@@ -26,7 +31,10 @@ func (store *Store) WithSigner(signer *provenance.Signer) *Store {
 }
 
 func NewStore(ctx context.Context, dsn string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, dsn)
+	// otelpgx query spans (OTEL_DESIGN §2 Postgres row); with telemetry
+	// disabled the tracer runs over a noop provider and pool semantics are
+	// unchanged.
+	pool, err := telemetry.Default().NewPGXPool(ctx, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open PostgreSQL pool: %w", err)
 	}
@@ -103,7 +111,25 @@ func (store *Store) GetForUpdate(ctx context.Context, transaction pgx.Tx, id str
 	return scanRequest(transaction.QueryRow(ctx, query, id))
 }
 
+// Decide runs the enrollment Decide gate under an admin Decision action
+// span (OTEL_DESIGN §2): the gate is an audit-critical privileged action, so
+// every decision attempt — approved, rejected or refused by the gate — is
+// traced with its outcome; subject identity stays off the span.
 func (store *Store) Decide(ctx context.Context, id, approverSubject, decision, reason string) (OnboardingRequest, error) {
+	ctx, span := telemetry.Default().StartSpan(ctx, "admin.enrollment.decide", trace.SpanKindInternal,
+		attribute.String("admin.decision", decision))
+	defer span.End()
+	decided, err := store.decide(ctx, id, approverSubject, decision, reason)
+	if err != nil {
+		span.RecordError(err)
+		span.SetAttributes(attribute.String("admin.decision.outcome", "refused"))
+		return OnboardingRequest{}, err
+	}
+	span.SetAttributes(attribute.String("admin.decision.outcome", string(decided.Status)))
+	return decided, nil
+}
+
+func (store *Store) decide(ctx context.Context, id, approverSubject, decision, reason string) (OnboardingRequest, error) {
 	transaction, err := store.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return OnboardingRequest{}, fmt.Errorf("begin decision transaction: %w", err)

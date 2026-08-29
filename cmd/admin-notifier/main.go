@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/munisp/blueeconomy-administration-service/internal/admin"
+	"github.com/munisp/blueeconomy-administration-service/internal/telemetry"
 )
 
 func main() {
@@ -22,6 +23,27 @@ func main() {
 	}
 	lifecycleContext, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	telemetryConfig, err := telemetry.LoadConfig("admin-notifier")
+	if err != nil {
+		logger.Error("admin-notifier telemetry configuration invalid", "error", err)
+		os.Exit(1)
+	}
+	pipeline, err := telemetry.Setup(lifecycleContext, telemetryConfig)
+	if err != nil {
+		logger.Error("admin-notifier telemetry setup failed", "error", err)
+		os.Exit(1)
+	}
+	telemetry.InstallDefault(pipeline)
+	defer func() {
+		if err := pipeline.Shutdown(context.Background()); err != nil {
+			logger.Error("admin-notifier telemetry shutdown failed", "error", err)
+		}
+	}()
+	if pipeline.Enabled() {
+		logger.Info("telemetry enabled", "otlp_endpoint", telemetryConfig.Endpoint)
+	} else {
+		logger.Info("telemetry disabled (OTEL_EXPORTER_OTLP_ENDPOINT not set)")
+	}
 	store, err := admin.NewStore(lifecycleContext, config.PostgresDSN)
 	if err != nil {
 		logger.Error("admin-notifier cannot reach PostgreSQL", "error", err)
