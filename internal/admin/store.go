@@ -113,8 +113,13 @@ func (store *Store) Decide(ctx context.Context, id, approverSubject, decision, r
 	if err != nil {
 		return OnboardingRequest{}, fmt.Errorf("load onboarding request: %w", err)
 	}
-	if request.Status != StatusSubmitted {
-		return OnboardingRequest{}, fmt.Errorf("request is in %q state and cannot be decided", request.Status)
+	// The decision gate is persona-aware (model.CanDecide): officer-submitted
+	// requests are decided from submitted; self-service enrollment requests
+	// only after an officer completed identity proofing (identity_verified).
+	// Without this gate a KYC-complete enrollment could never be decided and
+	// the public journey dead-ended.
+	if err := request.CanDecide(); err != nil {
+		return OnboardingRequest{}, err
 	}
 	if err := CanApprove(request.RequesterSubject, approverSubject); err != nil {
 		return OnboardingRequest{}, err
