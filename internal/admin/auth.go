@@ -21,8 +21,27 @@ import (
 	"time"
 )
 
+// Principal is the verified caller identity: the authenticated subject plus
+// the realm roles asserted by the edge proxy (trusted_proxy mode) or carried
+// by the verified JWT (jwt mode). Roles are the basis of route authorization;
+// the subject alone is never sufficient for privileged routes.
+type Principal struct {
+	Subject string
+	Roles   []string
+}
+
+// HasRole reports whether the principal holds the named realm role.
+func (principal Principal) HasRole(role string) bool {
+	for _, held := range principal.Roles {
+		if held == role {
+			return true
+		}
+	}
+	return false
+}
+
 type subjectAuthenticator interface {
-	Subject(*http.Request) (string, error)
+	Authenticate(*http.Request) (Principal, error)
 }
 
 type trustedProxyAuthenticator struct {
@@ -30,14 +49,18 @@ type trustedProxyAuthenticator struct {
 	identity string
 }
 
-func (auth trustedProxyAuthenticator) Subject(request *http.Request) (string, error) {
+// trustedProxyRolesHeader carries the comma-separated realm roles asserted by
+// the authenticating edge proxy for the verified caller.
+const trustedProxyRolesHeader = "X-Blueeconomy-Authenticated-Roles"
+
+func (auth trustedProxyAuthenticator) Authenticate(request *http.Request) (Principal, error) {
 	remoteHost, _, err := net.SplitHostPort(strings.TrimSpace(request.RemoteAddr))
 	if err != nil {
 		remoteHost = strings.TrimSpace(request.RemoteAddr)
 	}
 	remoteIP := net.ParseIP(remoteHost)
 	if remoteIP == nil {
-		return "", errors.New("trusted proxy source address is invalid")
+		return Principal{}, errors.New("trusted proxy source address is invalid")
 	}
 	allowed := false
 	for _, network := range auth.cidrs {
@@ -47,22 +70,49 @@ func (auth trustedProxyAuthenticator) Subject(request *http.Request) (string, er
 		}
 	}
 	if !allowed {
-		return "", errors.New("request source is not an approved trusted proxy")
+		return Principal{}, errors.New("request source is not an approved trusted proxy")
 	}
 	if strings.TrimSpace(request.Header.Get("X-Blueeconomy-Authenticated-By")) != auth.identity {
-		return "", errors.New("trusted proxy identity is missing or invalid")
+		return Principal{}, errors.New("trusted proxy identity is missing or invalid")
 	}
-	return validatedSubject(request.Header.Get("X-Blueeconomy-Authenticated-Subject"))
+	subject, err := validatedSubject(request.Header.Get("X-Blueeconomy-Authenticated-Subject"))
+	if err != nil {
+		return Principal{}, err
+	}
+	roles, err := validatedRoles(request.Header.Get(trustedProxyRolesHeader))
+	if err != nil {
+		return Principal{}, err
+	}
+	return Principal{Subject: subject, Roles: roles}, nil
+}
+
+// validatedRoles parses a comma-separated role list asserted by the trusted
+// edge proxy. Every role must be a canonical lower-case slug; anything else
+// is rejected so a malformed assertion can never smuggle a privileged role.
+func validatedRoles(value string) ([]string, error) {
+	roles := make([]string, 0, 8)
+	for _, raw := range strings.Split(strings.TrimSpace(value), ",") {
+		role := strings.TrimSpace(raw)
+		if role == "" {
+			continue
+		}
+		if err := validateReference("authenticated role", role, 128); err != nil {
+			return nil, err
+		}
+		roles = append(roles, role)
+	}
+	return roles, nil
 }
 
 type oidcAuthenticator struct {
-	issuer   string
-	audience string
-	jwksURL  *url.URL
-	client   *http.Client
-	mu       sync.RWMutex
-	keys     map[string]*rsa.PublicKey
-	loadedAt time.Time
+	issuer         string
+	audience       string
+	jwksURL        *url.URL
+	rolesClientIDs []string
+	client         *http.Client
+	mu             sync.RWMutex
+	keys           map[string]*rsa.PublicKey
+	loadedAt       time.Time
 }
 
 func newOIDCAuthenticator(config Config) *oidcAuthenticator {
@@ -80,79 +130,119 @@ func newOIDCAuthenticator(config Config) *oidcAuthenticator {
 		}
 	}
 	return &oidcAuthenticator{
-		issuer:   config.OIDCIssuer,
-		audience: config.OIDCAudience,
-		jwksURL:  config.OIDCJWKSURL,
-		client:   &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return errors.New("JWKS redirects are not permitted") }},
-		keys:     make(map[string]*rsa.PublicKey),
+		issuer:         config.OIDCIssuer,
+		audience:       config.OIDCAudience,
+		jwksURL:        config.OIDCJWKSURL,
+		rolesClientIDs: config.OIDCRolesClientIDs,
+		client:         &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return errors.New("JWKS redirects are not permitted") }},
+		keys:           make(map[string]*rsa.PublicKey),
 	}
 }
 
-func (auth *oidcAuthenticator) Subject(request *http.Request) (string, error) {
+func (auth *oidcAuthenticator) Authenticate(request *http.Request) (Principal, error) {
 	value := strings.TrimSpace(request.Header.Get("Authorization"))
 	parts := strings.SplitN(value, " ", 2)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || strings.TrimSpace(parts[1]) == "" {
-		return "", errors.New("Bearer authorization is required")
+		return Principal{}, errors.New("Bearer authorization is required")
 	}
 	token := strings.TrimSpace(parts[1])
 	segments := strings.Split(token, ".")
 	if len(segments) != 3 || segments[0] == "" || segments[1] == "" || segments[2] == "" {
-		return "", errors.New("JWT compact serialization is invalid")
+		return Principal{}, errors.New("JWT compact serialization is invalid")
 	}
 	headerBytes, err := decodeBase64URL(segments[0])
 	if err != nil {
-		return "", errors.New("JWT header is invalid")
+		return Principal{}, errors.New("JWT header is invalid")
 	}
 	var header struct {
 		Alg string `json:"alg"`
 		Kid string `json:"kid"`
 	}
 	if err := json.Unmarshal(headerBytes, &header); err != nil || header.Alg != "RS256" || strings.TrimSpace(header.Kid) == "" {
-		return "", errors.New("JWT algorithm or key ID is invalid")
+		return Principal{}, errors.New("JWT algorithm or key ID is invalid")
 	}
 	key, err := auth.key(header.Kid, true)
 	if err != nil {
-		return "", err
+		return Principal{}, err
 	}
 	signature, err := decodeBase64URL(segments[2])
 	if err != nil {
-		return "", errors.New("JWT signature is invalid")
+		return Principal{}, errors.New("JWT signature is invalid")
 	}
 	digest := sha256.Sum256([]byte(segments[0] + "." + segments[1]))
 	if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], signature); err != nil {
-		return "", errors.New("JWT signature verification failed")
+		return Principal{}, errors.New("JWT signature verification failed")
 	}
 	payloadBytes, err := decodeBase64URL(segments[1])
 	if err != nil {
-		return "", errors.New("JWT claims are invalid")
+		return Principal{}, errors.New("JWT claims are invalid")
 	}
 	var claims struct {
-		Issuer    string          `json:"iss"`
-		Subject   string          `json:"sub"`
-		Audience  json.RawMessage `json:"aud"`
-		Expires   json.Number     `json:"exp"`
-		NotBefore json.Number     `json:"nbf"`
+		Issuer      string          `json:"iss"`
+		Subject     string          `json:"sub"`
+		Audience    json.RawMessage `json:"aud"`
+		Expires     json.Number     `json:"exp"`
+		NotBefore   json.Number     `json:"nbf"`
+		RealmAccess struct {
+			Roles []string `json:"roles"`
+		} `json:"realm_access"`
+		ResourceAccess map[string]struct {
+			Roles []string `json:"roles"`
+		} `json:"resource_access"`
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(payloadBytes)))
 	decoder.UseNumber()
 	if err := decoder.Decode(&claims); err != nil {
-		return "", errors.New("JWT claims are invalid")
+		return Principal{}, errors.New("JWT claims are invalid")
 	}
 	if claims.Issuer != auth.issuer || !audienceContains(claims.Audience, auth.audience) {
-		return "", errors.New("JWT issuer or audience is invalid")
+		return Principal{}, errors.New("JWT issuer or audience is invalid")
 	}
 	now := time.Now().Unix()
 	expires, err := claims.Expires.Int64()
 	if err != nil || now >= expires {
-		return "", errors.New("JWT is expired or has no valid expiry")
+		return Principal{}, errors.New("JWT is expired or has no valid expiry")
 	}
 	if claims.NotBefore != "" {
 		notBefore, parseErr := claims.NotBefore.Int64()
 		if parseErr != nil || now < notBefore {
-			return "", errors.New("JWT is not yet valid")
+			return Principal{}, errors.New("JWT is not yet valid")
 		}
 	}
-	return validatedSubject(claims.Subject)
+	subject, err := validatedSubject(claims.Subject)
+	if err != nil {
+		return Principal{}, err
+	}
+	return Principal{Subject: subject, Roles: auth.rolesFromClaims(claims.RealmAccess.Roles, claims.ResourceAccess)}, nil
+}
+
+// rolesFromClaims collects the caller's realm roles plus the client roles of
+// the approved role-carrying clients. Only canonical lower-case slugs are
+// kept; malformed claim entries are dropped rather than trusted.
+func (auth *oidcAuthenticator) rolesFromClaims(realmRoles []string, resourceAccess map[string]struct {
+	Roles []string `json:"roles"`
+}) []string {
+	seen := make(map[string]struct{})
+	roles := make([]string, 0, len(realmRoles))
+	appendValid := func(candidates []string) {
+		for _, role := range candidates {
+			if err := validateReference("JWT role", role, 128); err != nil {
+				continue
+			}
+			if _, duplicate := seen[role]; duplicate {
+				continue
+			}
+			seen[role] = struct{}{}
+			roles = append(roles, role)
+		}
+	}
+	appendValid(realmRoles)
+	for _, clientID := range auth.rolesClientIDs {
+		if access, ok := resourceAccess[clientID]; ok {
+			appendValid(access.Roles)
+		}
+	}
+	return roles
 }
 
 func (auth *oidcAuthenticator) key(kid string, refresh bool) (*rsa.PublicKey, error) {

@@ -28,9 +28,18 @@ type Config struct {
 	OIDCAudience              string
 	OIDCJWKSURL               *url.URL
 	OIDCCAFile                string
+	OIDCRolesClientIDs        []string
 	TrustedProxyIdentity      string
 	TrustedProxyCIDRs         []*net.IPNet
+	ApproverRole              string
 }
+
+// DefaultApproverRole is the realm role that gates the onboarding
+// decide/provision/activate routes when ADMIN_ONBOARDING_APPROVER_ROLE is not
+// set. Submit stays open to any authenticated principal; privileged
+// transitions require this role plus the maker/checker separation enforced in
+// the store.
+const DefaultApproverRole = "onboarding-approver"
 
 func LoadConfig() (Config, error) {
 	config := Config{
@@ -49,6 +58,23 @@ func LoadConfig() (Config, error) {
 		OIDCAudience:              strings.TrimSpace(os.Getenv("ADMIN_OIDC_AUDIENCE")),
 		OIDCCAFile:                strings.TrimSpace(os.Getenv("ADMIN_OIDC_CA_FILE")),
 		TrustedProxyIdentity:      strings.TrimSpace(os.Getenv("ADMIN_TRUSTED_PROXY_IDENTITY")),
+		ApproverRole:              strings.TrimSpace(os.Getenv("ADMIN_ONBOARDING_APPROVER_ROLE")),
+	}
+	if config.ApproverRole == "" {
+		config.ApproverRole = DefaultApproverRole
+	}
+	if err := validateReference("ADMIN_ONBOARDING_APPROVER_ROLE", config.ApproverRole, 128); err != nil {
+		return Config{}, err
+	}
+	for _, clientID := range strings.Split(strings.TrimSpace(os.Getenv("ADMIN_OIDC_ROLES_CLIENT_IDS")), ",") {
+		clientID = strings.TrimSpace(clientID)
+		if clientID == "" {
+			continue
+		}
+		if err := validateReference("ADMIN_OIDC_ROLES_CLIENT_IDS entry", clientID, 128); err != nil {
+			return Config{}, err
+		}
+		config.OIDCRolesClientIDs = append(config.OIDCRolesClientIDs, clientID)
 	}
 	if config.ListenAddress == "" {
 		return Config{}, errors.New("ADMIN_SERVICE_LISTEN_ADDRESS is required")
