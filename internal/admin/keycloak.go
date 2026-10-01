@@ -12,11 +12,22 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 )
 
 type KeycloakClient struct {
-	httpClient     *http.Client
+	httpClient *http.Client
+	// tokenMu/tokenExpiry cache the client-credentials token until
+	// exp - tokenRefreshSkew; tokenFlight coalesces concurrent refreshes
+	// into a single token-endpoint round-trip (singleflight).
+	tokenMu        sync.Mutex
+	tokenValue     string
+	tokenExpiry    time.Time
+	tokenFlight    singleflight.Group
 	tokenURL       *url.URL
 	adminBaseURL   *url.URL
 	realm          string
@@ -105,30 +116,89 @@ func (client *KeycloakClient) AssignApprovedRoleGroups(ctx context.Context, keyc
 	if err != nil {
 		return err
 	}
-	for _, role := range roles {
+	// Bounded-parallel fan-out: one PUT per role/group, at most
+	// maxConcurrentGroupPUTs in flight; all errors are aggregated (joined)
+	// so a partial failure is honestly reported, never silently dropped.
+	group := new(errgroup.Group)
+	group.SetLimit(maxConcurrentGroupPUTs)
+	errs := make([]error, len(roles))
+	for index, role := range roles {
 		groupID, exists := client.roleGroupIDs[role]
 		if !exists || strings.TrimSpace(groupID) == "" {
 			return fmt.Errorf("no approved Keycloak group mapping exists for role %q", role)
 		}
-		endpoint := client.adminBaseURL.JoinPath("admin", "realms", client.realm, "organizations", client.organizationID, "groups", groupID, "members", keycloakUserID)
-		request, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint.String(), nil)
-		if err != nil {
-			return fmt.Errorf("create Keycloak organization group request: %w", err)
-		}
-		request.Header.Set("Authorization", "Bearer "+token)
-		response, err := client.httpClient.Do(request)
-		if err != nil {
-			return fmt.Errorf("send Keycloak organization group request: %w", err)
-		}
-		response.Body.Close()
-		if response.StatusCode != http.StatusNoContent {
-			return fmt.Errorf("Keycloak organization group assignment for role %q returned HTTP %d", role, response.StatusCode)
-		}
+		group.Go(func() error {
+			endpoint := client.adminBaseURL.JoinPath("admin", "realms", client.realm, "organizations", client.organizationID, "groups", groupID, "members", keycloakUserID)
+			request, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint.String(), nil)
+			if err != nil {
+				errs[index] = fmt.Errorf("create Keycloak organization group request: %w", err)
+				return nil
+			}
+			request.Header.Set("Authorization", "Bearer "+token)
+			response, err := client.httpClient.Do(request)
+			if err != nil {
+				errs[index] = fmt.Errorf("send Keycloak organization group request: %w", err)
+				return nil
+			}
+			defer response.Body.Close()
+			if response.StatusCode != http.StatusNoContent {
+				errs[index] = fmt.Errorf("Keycloak organization group assignment for role %q returned HTTP %d", role, response.StatusCode)
+			}
+			return nil
+		})
 	}
-	return nil
+	_ = group.Wait()
+	return errors.Join(errs...)
 }
 
+// tokenRefreshSkew is subtracted from the token lifetime so a cached token
+// is never used right up to its expiry boundary.
+const tokenRefreshSkew = 30 * time.Second
+
+// maxConcurrentGroupPUTs bounds the parallel organization-group
+// assignments in AssignApprovedRoleGroups.
+const maxConcurrentGroupPUTs = 4
+
+// clientCredentialsToken returns a cached client-credentials token,
+// refreshing it only once it is within tokenRefreshSkew of expiring
+// (ExpiresIn was previously parsed but ignored, so every operation paid a
+// token-endpoint round-trip). Concurrent refreshes are coalesced via
+// singleflight: exactly one token request is in flight at a time.
 func (client *KeycloakClient) clientCredentialsToken(ctx context.Context) (string, error) {
+	client.tokenMu.Lock()
+	if client.tokenValue != "" && time.Now().Before(client.tokenExpiry) {
+		token := client.tokenValue
+		client.tokenMu.Unlock()
+		return token, nil
+	}
+	client.tokenMu.Unlock()
+	result, err, _ := client.tokenFlight.Do("client-credentials", func() (any, error) {
+		// Re-check inside the flight: another goroutine may have refreshed
+		// the token while this one was queued.
+		client.tokenMu.Lock()
+		if client.tokenValue != "" && time.Now().Before(client.tokenExpiry) {
+			token := client.tokenValue
+			client.tokenMu.Unlock()
+			return token, nil
+		}
+		client.tokenMu.Unlock()
+		token, expiresIn, err := client.fetchClientCredentialsToken(ctx)
+		if err != nil {
+			return "", err
+		}
+		client.tokenMu.Lock()
+		client.tokenValue = token
+		client.tokenExpiry = time.Now().Add(time.Duration(expiresIn)*time.Second - tokenRefreshSkew)
+		client.tokenMu.Unlock()
+		return token, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return result.(string), nil
+}
+
+func (client *KeycloakClient) fetchClientCredentialsToken(ctx context.Context) (string, int, error) {
 	form := url.Values{
 		"grant_type":    {"client_credentials"},
 		"client_id":     {client.clientID},
@@ -136,25 +206,25 @@ func (client *KeycloakClient) clientCredentialsToken(ctx context.Context) (strin
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, client.tokenURL.String(), strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", fmt.Errorf("create Keycloak token request: %w", err)
+		return "", 0, fmt.Errorf("create Keycloak token request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept", "application/json")
 	response, err := client.httpClient.Do(request)
 	if err != nil {
-		return "", fmt.Errorf("send Keycloak token request: %w", err)
+		return "", 0, fmt.Errorf("send Keycloak token request: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, response.Body)
-		return "", fmt.Errorf("Keycloak token endpoint returned HTTP %d", response.StatusCode)
+		return "", 0, fmt.Errorf("Keycloak token endpoint returned HTTP %d", response.StatusCode)
 	}
 	var payload accessTokenResponse
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload); err != nil {
-		return "", fmt.Errorf("decode Keycloak token response: %w", err)
+		return "", 0, fmt.Errorf("decode Keycloak token response: %w", err)
 	}
 	if payload.TokenType != "Bearer" || strings.TrimSpace(payload.AccessToken) == "" || payload.ExpiresIn <= 0 {
-		return "", errors.New("Keycloak token response did not contain a usable bearer access token")
+		return "", 0, errors.New("Keycloak token response did not contain a usable bearer access token")
 	}
-	return payload.AccessToken, nil
+	return payload.AccessToken, payload.ExpiresIn, nil
 }
